@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-issues"
+version = "0.1.0"
+description = "Local-first, file-based issue tracker with a gh-shaped CLI."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "ben abraham" }]
+keywords = ["issues", "tracker", "cli", "gh", "local-first"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Utilities",
+]
+# stdlib-only — no runtime dependencies.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/benabraham/local-issues"
+Issues = "https://github.com/benabraham/local-issues/issues"
+
+[project.scripts]
+issues = "issues:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
