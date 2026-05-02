@@ -1002,6 +1002,75 @@ def repo_append_comment(issues_dir, number, *, body, author):
     return task, path
 
 
+# Sentinel: distinguishes "caller didn't pass --priority" from "caller passed
+# --priority none" (which sets priority to None/null).
+_UNSET = object()
+
+
+def repo_edit(issues_dir, number, *, title=None, body=None,
+              add_labels=(), remove_labels=(), add_blocked_by=(),
+              remove_blocked_by=(), priority=_UNSET):
+    """Edit a task in-place atomically (write-to-temp + rename(2)).
+
+    Only fields that are explicitly supplied are changed; everything else —
+    including the comments section — is preserved exactly.
+
+    `priority=_UNSET` (default) leaves priority unchanged.
+    `priority=None` sets it to null.
+    `priority=<int>` sets it to that integer.
+
+    Returns (updated_task, path).
+    """
+    task, path = repo_read(issues_dir, number)
+
+    if title is not None:
+        task['title'] = title
+
+    if body is not None:
+        task['body'] = _normalise_body(body)
+        # comments_raw is preserved as-is; we only replace body.
+
+    if add_labels or remove_labels:
+        current = list(task.get('labels') or [])
+        for lbl in add_labels:
+            if lbl not in current:
+                current.append(lbl)
+        remove_set = set(remove_labels)
+        current = [lbl for lbl in current if lbl not in remove_set]
+        task['labels'] = current
+
+    if add_blocked_by or remove_blocked_by:
+        current = list(task.get('blocked_by') or [])
+        for n in add_blocked_by:
+            if n not in current:
+                current.append(n)
+        remove_set = set(remove_blocked_by)
+        current = [n for n in current if n not in remove_set]
+        task['blocked_by'] = current
+
+    if priority is not _UNSET:
+        task['priority'] = priority
+
+    text = task_serialise(task)
+    _atomic_write_text(path, text)
+    return task, path
+
+
+def repo_delete(issues_dir, number):
+    """Permanently delete a task file via unlink(2).
+
+    `.next-id` is NOT decremented; the deleted ID is never reused.
+    Raises IssuesError if the task does not exist.
+    """
+    path = repo_find_path(issues_dir, number)
+    if path is None:
+        raise IssuesError(f'task #{number} not found')
+    try:
+        os.unlink(path)
+    except OSError as exc:
+        raise IssuesError(f'cannot delete task #{number}: {exc}') from exc
+
+
 # ---------------------------------------------------------------------------
 # Atomic FS primitives
 # ---------------------------------------------------------------------------
@@ -1402,6 +1471,44 @@ def cli_build_parser():
         help='Path to body file. `-` reads from stdin.',
     )
 
+    edit_p = sub.add_parser('edit', help='Edit a task in-place.', parents=[gh])
+    edit_p.add_argument('id', type=int)
+    edit_p.add_argument('--title', '-t', default=None)
+    body_g3 = edit_p.add_mutually_exclusive_group()
+    body_g3.add_argument('--body', '-b', default=None)
+    body_g3.add_argument(
+        '--body-file', '-F', default=None,
+        help='Path to body file. `-` reads from stdin.',
+    )
+    edit_p.add_argument(
+        '--add-label', action='append', default=[], metavar='L',
+        help='Add a label (repeatable).',
+    )
+    edit_p.add_argument(
+        '--remove-label', action='append', default=[], metavar='L',
+        help='Remove a label (repeatable; no-op if absent).',
+    )
+    edit_p.add_argument(
+        '--add-blocked-by', action='append', type=int, default=[], metavar='N',
+        help='Add a blocked-by dep (repeatable).',
+    )
+    edit_p.add_argument(
+        '--remove-blocked-by', action='append', type=int, default=[], metavar='N',
+        help='Remove a blocked-by dep (repeatable; no-op if absent).',
+    )
+    edit_p.add_argument(
+        '--priority', '-p', default=None, metavar='N',
+        help='Set priority (integer). Pass `none` to clear.',
+    )
+
+    delete_p = sub.add_parser('delete', help='Permanently delete a task.',
+                               parents=[gh])
+    delete_p.add_argument('id', type=int)
+    delete_p.add_argument(
+        '--yes', '-y', action='store_true',
+        help='Skip confirmation prompt.',
+    )
+
     return p
 
 
@@ -1424,6 +1531,10 @@ def cli_dispatch(argv=None):
         return cli_cmd_reopen(args)
     if args.cmd == 'comment':
         return cli_cmd_comment(args)
+    if args.cmd == 'edit':
+        return cli_cmd_edit(args)
+    if args.cmd == 'delete':
+        return cli_cmd_delete(args)
     parser.error(f'unknown command: {args.cmd}')
 
 
@@ -1541,6 +1652,86 @@ def cli_cmd_comment(args):
     author = _get_git_author()
     task, _ = repo_append_comment(issues_dir, args.id, body=body, author=author)
     sys.stdout.write(f"Added comment to task #{task['number']}\n")
+    return 0
+
+
+def _parse_priority_arg(raw):
+    """Convert the --priority string to int or None.
+
+    Accepts an integer string or the magic value 'none' (case-insensitive)
+    which clears priority (returns None).  Raises IssuesError on invalid input.
+    """
+    if raw is None:
+        return _UNSET
+    if raw.lower() == 'none':
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        raise IssuesError(
+            f'invalid --priority value {raw!r}: must be an integer or "none"'
+        )
+
+
+def cli_cmd_edit(args):
+    issues_dir = workspace_resolve(auto_create=False)
+
+    # Body: only resolve if --body or --body-file was supplied.
+    body = None
+    if args.body is not None or args.body_file is not None:
+        body = _resolve_body(args)
+
+    priority = _parse_priority_arg(args.priority)
+
+    task, path = repo_edit(
+        issues_dir, args.id,
+        title=args.title,
+        body=body,
+        add_labels=args.add_label,
+        remove_labels=args.remove_label,
+        add_blocked_by=args.add_blocked_by,
+        remove_blocked_by=args.remove_blocked_by,
+        priority=priority,
+    )
+    sys.stdout.write(f"Updated task #{task['number']} at {path}\n")
+    return 0
+
+
+def _confirm_delete(task, *, yes, stdin=None):
+    """Prompt the user to confirm deletion.
+
+    Returns True if confirmed, False if aborted.  Raises IssuesError if not
+    on a TTY and --yes was not passed (non-interactive context guard).
+
+    `stdin` is injectable for testing (defaults to sys.stdin).
+    """
+    if yes:
+        return True
+    stream = stdin if stdin is not None else sys.stdin
+    if not stream.isatty():
+        raise IssuesError(
+            'refusing to delete without --yes in a non-TTY context. '
+            'Pass --yes to confirm.'
+        )
+    title = task.get('title', '')
+    number = task.get('number', '?')
+    prompt = f'Delete task #{number} "{title}"? [y/N]: '
+    try:
+        answer = input(prompt)
+    except EOFError:
+        return False
+    return answer.strip().lower() in ('y', 'yes')
+
+
+def cli_cmd_delete(args):
+    issues_dir = workspace_resolve(auto_create=False)
+    # Read the task first so we can show the title in the prompt.
+    task, _ = repo_read(issues_dir, args.id)
+    if not _confirm_delete(task, yes=args.yes):
+        sys.stderr.write('Aborted.\n')
+        return 1
+    repo_delete(issues_dir, args.id)
+    sys.stdout.write(f"Deleted task #{task['number']}\n")
     return 0
 
 

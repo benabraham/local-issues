@@ -13,6 +13,8 @@ from issues import (
     repo_append_comment,
     repo_close,
     repo_create,
+    repo_delete,
+    repo_edit,
     repo_existing_numbers,
     repo_find_path,
     repo_format_filename,
@@ -389,6 +391,216 @@ class MissingIssuesDirTests(unittest.TestCase):
             self.assertEqual(task['number'], 1)
             self.assertTrue((issues_dir / 'open').is_dir())
             self.assertTrue((issues_dir / 'closed').is_dir())
+
+
+class RepoEditTests(IsolatedRepoTestCase):
+    """repo_edit: field preservation, composition, atomic write."""
+
+    def _make_task(self, **kwargs):
+        defaults = dict(title='Original', body='Body.\n', labels=['a', 'b'],
+                        blocked_by=[5, 6], priority=3)
+        defaults.update(kwargs)
+        task, _ = repo_create(self.issues_dir, **defaults)
+        return task
+
+    def test_edit_title_only(self):
+        task = self._make_task()
+        repo_edit(self.issues_dir, task['number'], title='Renamed')
+        loaded, _ = repo_read(self.issues_dir, task['number'])
+        self.assertEqual(loaded['title'], 'Renamed')
+        # Everything else unchanged.
+        self.assertEqual(loaded['body'], 'Body.\n')
+        self.assertEqual(loaded['labels'], ['a', 'b'])
+        self.assertEqual(loaded['blocked_by'], [5, 6])
+        self.assertEqual(loaded['priority'], 3)
+
+    def test_edit_body_replaces_body(self):
+        task = self._make_task()
+        repo_edit(self.issues_dir, task['number'], body='New body.')
+        loaded, _ = repo_read(self.issues_dir, task['number'])
+        self.assertIn('New body', loaded['body'])
+        # Other frontmatter preserved.
+        self.assertEqual(loaded['labels'], ['a', 'b'])
+
+    def test_edit_body_preserves_comments_section(self):
+        task = self._make_task()
+        # Append a comment first.
+        repo_append_comment(self.issues_dir, task['number'],
+                            body='Keep this comment', author='alice')
+        # Now edit the body.
+        repo_edit(self.issues_dir, task['number'], body='Wholly new body.')
+        loaded, _ = repo_read(self.issues_dir, task['number'])
+        self.assertIn('Wholly new body', loaded['body'])
+        self.assertIn('Keep this comment', loaded['comments_raw'])
+        self.assertIn('## Comments', loaded['comments_raw'])
+        comments = task_parse_comments(loaded.get('comments_raw', ''))
+        self.assertEqual(len(comments), 1)
+        self.assertEqual(comments[0]['body'], 'Keep this comment')
+
+    def test_edit_add_label(self):
+        task = self._make_task()
+        repo_edit(self.issues_dir, task['number'], add_labels=['c'])
+        loaded, _ = repo_read(self.issues_dir, task['number'])
+        self.assertIn('c', loaded['labels'])
+        self.assertIn('a', loaded['labels'])
+
+    def test_edit_remove_label(self):
+        task = self._make_task()
+        repo_edit(self.issues_dir, task['number'], remove_labels=['a'])
+        loaded, _ = repo_read(self.issues_dir, task['number'])
+        self.assertNotIn('a', loaded['labels'])
+        self.assertIn('b', loaded['labels'])
+
+    def test_edit_add_then_remove_same_label_is_noop(self):
+        """add-label X then remove-label X in one call leaves labels unchanged."""
+        task = self._make_task(labels=['x'])
+        repo_edit(self.issues_dir, task['number'],
+                  add_labels=['y'], remove_labels=['y'])
+        loaded, _ = repo_read(self.issues_dir, task['number'])
+        # 'y' was added then removed: should not be present.
+        self.assertNotIn('y', loaded['labels'])
+        self.assertIn('x', loaded['labels'])
+
+    def test_edit_remove_absent_label_is_noop(self):
+        task = self._make_task(labels=['a'])
+        # Removing a label that doesn't exist is silently ignored.
+        repo_edit(self.issues_dir, task['number'], remove_labels=['nonexistent'])
+        loaded, _ = repo_read(self.issues_dir, task['number'])
+        self.assertEqual(loaded['labels'], ['a'])
+
+    def test_edit_add_blocked_by(self):
+        task = self._make_task(blocked_by=[1])
+        repo_edit(self.issues_dir, task['number'], add_blocked_by=[2])
+        loaded, _ = repo_read(self.issues_dir, task['number'])
+        self.assertIn(1, loaded['blocked_by'])
+        self.assertIn(2, loaded['blocked_by'])
+
+    def test_edit_remove_blocked_by(self):
+        task = self._make_task(blocked_by=[1, 2])
+        repo_edit(self.issues_dir, task['number'], remove_blocked_by=[1])
+        loaded, _ = repo_read(self.issues_dir, task['number'])
+        self.assertNotIn(1, loaded['blocked_by'])
+        self.assertIn(2, loaded['blocked_by'])
+
+    def test_edit_remove_absent_blocked_by_is_noop(self):
+        task = self._make_task(blocked_by=[1])
+        repo_edit(self.issues_dir, task['number'], remove_blocked_by=[99])
+        loaded, _ = repo_read(self.issues_dir, task['number'])
+        self.assertEqual(loaded['blocked_by'], [1])
+
+    def test_edit_set_priority(self):
+        task = self._make_task(priority=5)
+        repo_edit(self.issues_dir, task['number'], priority=0)
+        loaded, _ = repo_read(self.issues_dir, task['number'])
+        self.assertEqual(loaded['priority'], 0)
+
+    def test_edit_priority_none_clears_priority(self):
+        task = self._make_task(priority=3)
+        repo_edit(self.issues_dir, task['number'], priority=None)
+        loaded, _ = repo_read(self.issues_dir, task['number'])
+        self.assertIsNone(loaded['priority'])
+
+    def test_edit_priority_unset_leaves_priority_unchanged(self):
+        """Omitting priority (using _UNSET default) preserves existing value."""
+        task = self._make_task(priority=7)
+        repo_edit(self.issues_dir, task['number'], title='Renamed')
+        loaded, _ = repo_read(self.issues_dir, task['number'])
+        self.assertEqual(loaded['priority'], 7)
+
+    def test_edit_multiple_flags_compose(self):
+        """All flags in one call apply atomically."""
+        task = self._make_task(title='Old', labels=['a'], priority=5,
+                               blocked_by=[10])
+        repo_edit(self.issues_dir, task['number'],
+                  title='New',
+                  add_labels=['b'], remove_labels=['a'],
+                  add_blocked_by=[20], remove_blocked_by=[10],
+                  priority=1)
+        loaded, _ = repo_read(self.issues_dir, task['number'])
+        self.assertEqual(loaded['title'], 'New')
+        self.assertEqual(loaded['labels'], ['b'])
+        self.assertEqual(loaded['blocked_by'], [20])
+        self.assertEqual(loaded['priority'], 1)
+
+    def test_edit_preserves_state_and_metadata(self):
+        """State, created_at, closed_at, assignees, type are not touched."""
+        task, _ = repo_create(self.issues_dir, title='Meta', body='b',
+                               task_type='prd', assignees=['bob'])
+        repo_close(self.issues_dir, task['number'])
+        repo_edit(self.issues_dir, task['number'], title='Meta renamed')
+        loaded, _ = repo_read(self.issues_dir, task['number'])
+        self.assertEqual(loaded['state'], 'closed')
+        self.assertEqual(loaded['type'], 'prd')
+        self.assertEqual(loaded['assignees'], ['bob'])
+        self.assertEqual(loaded['created_at'], task['created_at'])
+
+    def test_edit_uses_atomic_write(self):
+        """Simulated rename failure leaves no partial file."""
+        task = self._make_task()
+        _, path = repo_read(self.issues_dir, task['number'])
+        original_text = path.read_text(encoding='utf-8')
+
+        def boom(*_args, **_kwargs):
+            raise OSError('simulated rename failure')
+
+        with mock.patch('issues.os.rename', side_effect=boom):
+            with self.assertRaises(OSError):
+                repo_edit(self.issues_dir, task['number'], title='Should not land')
+
+        # File must still contain the original content.
+        self.assertEqual(path.read_text(encoding='utf-8'), original_text)
+        # No temp files left in the directory.
+        parent = path.parent
+        leftovers = [f for f in os.listdir(parent) if f.endswith('.tmp')]
+        self.assertEqual(leftovers, [])
+
+    def test_edit_missing_task_raises(self):
+        with self.assertRaises(IssuesError):
+            repo_edit(self.issues_dir, 999, title='Ghost')
+
+
+class RepoDeleteTests(IsolatedRepoTestCase):
+    """repo_delete: unlink, IssuesError on missing, .next-id untouched."""
+
+    def test_delete_removes_file(self):
+        task, _ = repo_create(self.issues_dir, title='To delete', body='b')
+        path = repo_find_path(self.issues_dir, task['number'])
+        self.assertIsNotNone(path)
+        repo_delete(self.issues_dir, task['number'])
+        self.assertFalse(path.exists())
+
+    def test_delete_then_read_raises(self):
+        task, _ = repo_create(self.issues_dir, title='Gone', body='b')
+        repo_delete(self.issues_dir, task['number'])
+        with self.assertRaises(IssuesError):
+            repo_read(self.issues_dir, task['number'])
+
+    def test_delete_missing_task_raises(self):
+        with self.assertRaises(IssuesError):
+            repo_delete(self.issues_dir, 999)
+
+    def test_delete_does_not_decrement_next_id(self):
+        task, _ = repo_create(self.issues_dir, title='Will be deleted', body='b')
+        next_id_after_create = repo_read_next_id(self.issues_dir)
+        repo_delete(self.issues_dir, task['number'])
+        next_id_after_delete = repo_read_next_id(self.issues_dir)
+        self.assertEqual(next_id_after_create, next_id_after_delete)
+
+    def test_delete_id_not_reused(self):
+        """After deleting task #1, the next created task should get #2."""
+        task1, _ = repo_create(self.issues_dir, title='First', body='b')
+        self.assertEqual(task1['number'], 1)
+        repo_delete(self.issues_dir, 1)
+        task2, _ = repo_create(self.issues_dir, title='Second', body='b')
+        self.assertEqual(task2['number'], 2)
+
+    def test_delete_works_on_closed_task(self):
+        task, _ = repo_create(self.issues_dir, title='Close then delete', body='b')
+        repo_close(self.issues_dir, task['number'])
+        path = repo_find_path(self.issues_dir, task['number'])
+        self.assertIsNotNone(path)
+        repo_delete(self.issues_dir, task['number'])
+        self.assertFalse(path.exists())
 
 
 if __name__ == '__main__':

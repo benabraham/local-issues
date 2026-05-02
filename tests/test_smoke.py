@@ -563,6 +563,174 @@ class CommentSmokeTests(unittest.TestCase):
         self.assertIn('body', result.stderr.lower())
 
 
+class EditSmokeTests(unittest.TestCase):
+    """End-to-end smoke tests for `issues edit`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cwd = Path(self.tmp.name)
+        run_cli(['init'], cwd=self.cwd)
+        run_cli(
+            ['create', '--title', 'Edit target',
+             '--body', 'Original body.',
+             '--label', 'foo', '--priority', '5',
+             '--blocked-by', '9'],
+            cwd=self.cwd,
+        )
+
+    def _run(self, *args, stdin=None):
+        return run_cli(list(args), cwd=self.cwd, stdin=stdin)
+
+    def _read_file(self):
+        return (self.cwd / 'issues' / 'open' / '001-edit-target.md').read_text(
+            encoding='utf-8')
+
+    def test_edit_title(self):
+        result = self._run('edit', '1', '--title', 'New title')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('title: New title', self._read_file())
+
+    def test_edit_title_add_label_priority_together(self):
+        result = self._run(
+            'edit', '1', '--title', 'Multi', '--add-label', 'bar', '--priority', '2',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        content = self._read_file()
+        self.assertIn('title: Multi', content)
+        self.assertIn('bar', content)
+        self.assertIn('priority: 2', content)
+
+    def test_edit_add_and_remove_label(self):
+        self._run('edit', '1', '--add-label', 'new')
+        result = self._run('edit', '1', '--remove-label', 'foo')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        content = self._read_file()
+        self.assertNotIn('foo', content)
+        self.assertIn('new', content)
+
+    def test_edit_body_replaces_body(self):
+        result = self._run('edit', '1', '--body', 'Replaced body.')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        content = self._read_file()
+        self.assertIn('Replaced body.', content)
+        self.assertNotIn('Original body.', content)
+
+    def test_edit_body_preserves_comments(self):
+        # First append a comment.
+        self._run('comment', '1', '--body', 'Existing comment')
+        # Now replace the body.
+        result = self._run('edit', '1', '--body', 'Brand new body.')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # View with JSON to check comments survived.
+        view = self._run('view', '1', '--json')
+        d = json.loads(view.stdout)
+        self.assertEqual(len(d['comments']), 1)
+        self.assertEqual(d['comments'][0]['body'], 'Existing comment')
+        self.assertIn('Brand new body', d['body'])
+
+    def test_edit_body_file_stdin(self):
+        result = self._run('edit', '1', '--body-file', '-', stdin='From stdin.\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('From stdin.', self._read_file())
+
+    def test_edit_priority_none_clears_priority(self):
+        result = self._run('edit', '1', '--priority', 'none')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        view = self._run('view', '1', '--json')
+        d = json.loads(view.stdout)
+        self.assertIsNone(d['priority'])
+
+    def test_edit_add_blocked_by(self):
+        result = self._run('edit', '1', '--add-blocked-by', '10')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        view = self._run('view', '1', '--json')
+        d = json.loads(view.stdout)
+        self.assertIn(9, d['blockedBy'])
+        self.assertIn(10, d['blockedBy'])
+
+    def test_edit_remove_blocked_by(self):
+        result = self._run('edit', '1', '--remove-blocked-by', '9')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        view = self._run('view', '1', '--json')
+        d = json.loads(view.stdout)
+        self.assertNotIn(9, d['blockedBy'])
+
+    def test_edit_missing_task_errors(self):
+        result = self._run('edit', '999', '--title', 'Ghost')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('not found', result.stderr.lower())
+
+    def test_edit_no_flags_is_noop(self):
+        """Calling edit with only the id and no flags is a valid no-op."""
+        result = self._run('edit', '1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_edit_invalid_priority_errors(self):
+        result = self._run('edit', '1', '--priority', 'bad')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('priority', result.stderr.lower())
+
+
+class DeleteSmokeTests(unittest.TestCase):
+    """End-to-end smoke tests for `issues delete`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cwd = Path(self.tmp.name)
+        run_cli(['init'], cwd=self.cwd)
+        run_cli(
+            ['create', '--title', 'To delete', '--body', 'b'],
+            cwd=self.cwd,
+        )
+
+    def _run(self, *args, stdin=None):
+        return run_cli(list(args), cwd=self.cwd, stdin=stdin)
+
+    def test_delete_yes_removes_file(self):
+        result = self._run('delete', '1', '--yes')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(
+            (self.cwd / 'issues' / 'open' / '001-to-delete.md').exists()
+        )
+
+    def test_delete_yes_file_unreadable(self):
+        self._run('delete', '1', '--yes')
+        result = self._run('view', '1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('not found', result.stderr.lower())
+
+    def test_delete_non_tty_without_yes_errors(self):
+        """Non-TTY context (piped stdin) without --yes must error out."""
+        result = self._run('delete', '1', stdin='')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--yes', result.stderr)
+
+    def test_delete_missing_task_errors(self):
+        result = self._run('delete', '999', '--yes')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('not found', result.stderr.lower())
+
+    def test_delete_id_not_reused(self):
+        """After delete, next created task gets the next fresh ID, not the deleted one."""
+        self._run('delete', '1', '--yes')
+        result = run_cli(
+            ['create', '--title', 'Next task', '--body', 'b'],
+            cwd=self.cwd,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # .next-id must be >= 2; the new task should have number 2 not 1.
+        next_id_raw = (self.cwd / 'issues' / '.next-id').read_text(
+            encoding='utf-8').strip()
+        self.assertGreaterEqual(int(next_id_raw), 3)
+        # The file 001-*.md should NOT exist.
+        open_files = list((self.cwd / 'issues' / 'open').iterdir())
+        names = [f.name for f in open_files]
+        self.assertFalse(any(n.startswith('001-') for n in names))
+        self.assertTrue(any(n.startswith('002-') for n in names))
+
+
 class GhCompatNoOpTests(unittest.TestCase):
     """Smoke tests: --web and --repo R are accepted as no-ops on every verb."""
 
