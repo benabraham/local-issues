@@ -5,7 +5,8 @@ Single-file, stdlib-only, Python 3.10+. Linux/macOS only.
 Module structure (informal — there are no separate Python modules; functions
 are grouped by section comments):
 
-  Workspace  — discovery of `issues/` directory (CWD walk-up).
+  Workspace  — discovery of `issues/` directory (CWD walk-up, worktree,
+               sibling-shared).
   Task       — frontmatter parse/serialise, slug, snake<->camel.
   Repository — atomic on-disk task store (O_EXCL, rename, .next-id).
   Query      — filter composition, priority-then-ID sort key.
@@ -93,22 +94,94 @@ class IssuesError(Exception):
 # Workspace
 # ---------------------------------------------------------------------------
 #
-# Slice 1: walk up from CWD looking for an `issues/` directory. If found,
-# use it; otherwise behaviour depends on whether the caller is reading
-# (error) or writing (auto-create at CWD).
+# Full discovery algorithm (slice 6):
 #
-# Worktree gitdir resolution and sibling-shared discovery are deferred to
-# slice 6.
+#   1. Walk up from CWD looking for a `.git` (file or directory).
+#   2. If `.git` is a directory: repo root = parent of the `.git/` dir.
+#   3. If `.git` is a file: follow the `gitdir:` pointer (worktree
+#      indirection).  The *repo root* for our purposes is the parent of the
+#      `.git` file (i.e. the worktree's working directory) — NOT the common
+#      dir's parent.
+#   4. With repo root in hand, look for `issues/` at:
+#        a. repo root first
+#        b. parent of repo root (sibling-shared layout)
+#   5. If no `.git` is found anywhere up the tree, fall back to plain
+#      walk-up looking for `issues/` directly (slice 1 behaviour).
+#   6. Auto-create-on-write rules still apply when nothing is found.
+
+
+def _find_git_marker(start):
+    """Walk up from `start` looking for a `.git` file or directory.
+
+    Returns ``(path_to_.git, kind)`` where *kind* is ``'dir'`` or
+    ``'file'``, or ``None`` if no ``.git`` is found before the filesystem
+    root.  Pure (no writes, no git subprocess).
+    """
+    for candidate in (start, *start.parents):
+        git = candidate / '.git'
+        if git.is_dir():
+            return git, 'dir'
+        if git.is_file():
+            return git, 'file'
+    return None
+
+
+def _resolve_worktree_gitdir(git_file):
+    """Parse a worktree `.git` file and return the absolute gitdir Path.
+
+    The file contains a single ``gitdir: <path>`` line.  The path may be
+    relative (to the directory that contains the `.git` file) or absolute.
+    Raises ``IssuesError`` if the file is malformed.
+    """
+    try:
+        text = git_file.read_text(encoding='utf-8')
+    except OSError as exc:
+        raise IssuesError(f'cannot read {git_file}: {exc}') from exc
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith('gitdir:'):
+            raw = line[len('gitdir:'):].strip()
+            if not raw:
+                raise IssuesError(f'empty gitdir in {git_file}')
+            path = Path(raw)
+            if not path.is_absolute():
+                path = (git_file.parent / path).resolve()
+            return path
+    raise IssuesError(f'no gitdir: line found in {git_file}')
 
 
 def workspace_find(start=None):
     """Walk up from `start` (default CWD) looking for an `issues/` dir.
 
-    Returns the absolute Path to the `issues/` directory or None if not
-    found.
+    Full algorithm (slice 6):
+    - Find the nearest `.git` marker walking up from *start*.
+    - For a ``.git`` directory: repo root = its parent.
+    - For a ``.git`` file (worktree): repo root = parent of the `.git`
+      file (the worktree's working-directory root).
+    - Check for ``issues/`` at repo root, then at repo root's parent
+      (sibling-shared layout).
+    - If no ``.git`` is found: plain walk-up looking for ``issues/``
+      directly (preserves slice 1 behaviour in non-git trees).
+
+    Returns the absolute Path to the ``issues/`` directory, or ``None``.
     """
-    cwd = Path(start) if start else Path.cwd()
-    cwd = cwd.resolve()
+    cwd = Path(start).resolve() if start else Path.cwd().resolve()
+
+    result = _find_git_marker(cwd)
+
+    if result is not None:
+        git_path, kind = result
+        # Repo root: parent of .git dir, or parent of .git file (worktree).
+        repo_root = git_path.parent
+
+        # Two candidate locations: repo root, then its parent.
+        for candidate_root in (repo_root, repo_root.parent):
+            issues_dir = candidate_root / ISSUES_DIRNAME
+            if issues_dir.is_dir():
+                return issues_dir
+        return None
+
+    # No .git found anywhere — plain walk-up (no-git / bare filesystem).
     for candidate in (cwd, *cwd.parents):
         issues_dir = candidate / ISSUES_DIRNAME
         if issues_dir.is_dir():
@@ -1219,22 +1292,41 @@ def output_status_text(tasks):
 # ---------------------------------------------------------------------------
 
 
+def _gh_compat_parent():
+    """Return an ArgumentParser with gh-compat no-op flags for use as a parent.
+
+    Pass this to subparsers via ``parents=[_gh_compat_parent()]`` so that
+    every verb silently accepts ``--web`` and ``--repo R`` without any
+    behavioural effect.  ``add_help=False`` is required by argparse to avoid
+    duplicate ``-h`` flags when the parent is merged into a child parser.
+    """
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument('--web', action='store_true', help='(no-op, gh compat)')
+    p.add_argument('--repo', '-R', default=None, metavar='R',
+                   help='(no-op, gh compat)')
+    return p
+
+
 def cli_build_parser():
     p = argparse.ArgumentParser(
         prog='issues',
         description='Local-first, file-based issue tracker (gh-shaped CLI).',
     )
-    # gh-style global no-ops (model muscle memory).
-    p.add_argument('--repo', default=None, help='(no-op, gh compat)')
     sub = p.add_subparsers(dest='cmd', required=True)
 
-    init_p = sub.add_parser('init', help='Bootstrap an issues/ directory.')
+    # Shared parent carrying gh-compat no-op flags (--web, --repo).
+    # Each subparser is created with parents=[gh] so it inherits both flags.
+    gh = _gh_compat_parent()
+
+    init_p = sub.add_parser('init', help='Bootstrap an issues/ directory.',
+                             parents=[gh])
     init_p.add_argument(
         '--gitignore', action='store_true',
         help='Append `issues/` to repo .gitignore.',
     )
 
-    create_p = sub.add_parser('create', help='Create a new task.')
+    create_p = sub.add_parser('create', help='Create a new task.',
+                               parents=[gh])
     create_p.add_argument('--title', '-t', required=True)
     body_g = create_p.add_mutually_exclusive_group()
     body_g.add_argument('--body', '-b', default=None)
@@ -1259,14 +1351,12 @@ def cli_build_parser():
         '--assignee', '-a', action='append', default=[],
         help='Add an assignee (repeatable).',
     )
-    create_p.add_argument('--web', action='store_true', help='(no-op, gh compat)')
 
-    view_p = sub.add_parser('view', help='View a task.')
+    view_p = sub.add_parser('view', help='View a task.', parents=[gh])
     view_p.add_argument('id', type=int)
     view_p.add_argument('--json', action='store_true', dest='as_json')
-    view_p.add_argument('--web', action='store_true', help='(no-op, gh compat)')
 
-    list_p = sub.add_parser('list', help='List tasks.')
+    list_p = sub.add_parser('list', help='List tasks.', parents=[gh])
     list_p.add_argument(
         '--label', '-l', action='append', default=[],
         help='Filter by label (repeatable; AND semantics).',
@@ -1284,11 +1374,10 @@ def cli_build_parser():
         '--json', action='store_true', dest='as_json',
         help='Output as JSON array.',
     )
-    list_p.add_argument('--web', action='store_true', help='(no-op, gh compat)')
 
-    _sub = sub.add_parser('status', help='Show open/closed task counts.')
+    sub.add_parser('status', help='Show open/closed task counts.', parents=[gh])
 
-    close_p = sub.add_parser('close', help='Close a task.')
+    close_p = sub.add_parser('close', help='Close a task.', parents=[gh])
     close_p.add_argument('id', type=int)
     close_p.add_argument(
         '--reason', choices=('completed', 'not_planned'), default='completed',
@@ -1299,10 +1388,12 @@ def cli_build_parser():
         help='Optional comment to append in the same operation.',
     )
 
-    reopen_p = sub.add_parser('reopen', help='Reopen a closed task.')
+    reopen_p = sub.add_parser('reopen', help='Reopen a closed task.',
+                               parents=[gh])
     reopen_p.add_argument('id', type=int)
 
-    comment_p = sub.add_parser('comment', help='Add a comment to a task.')
+    comment_p = sub.add_parser('comment', help='Add a comment to a task.',
+                                parents=[gh])
     comment_p.add_argument('id', type=int)
     body_g2 = comment_p.add_mutually_exclusive_group()
     body_g2.add_argument('--body', '-b', default=None)

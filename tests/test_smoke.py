@@ -563,5 +563,145 @@ class CommentSmokeTests(unittest.TestCase):
         self.assertIn('body', result.stderr.lower())
 
 
+class GhCompatNoOpTests(unittest.TestCase):
+    """Smoke tests: --web and --repo R are accepted as no-ops on every verb."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cwd = Path(self.tmp.name)
+        # Bootstrap a workspace and create one task so read-verbs don't error.
+        run_cli(['init'], cwd=self.cwd)
+        run_cli(
+            ['create', '--title', 'Compat task', '--body', 'B'],
+            cwd=self.cwd,
+        )
+
+    def _run(self, *args):
+        return run_cli(list(args), cwd=self.cwd)
+
+    # --- list ---
+
+    def test_list_web_flag_no_error(self):
+        result = self._run('list', '--web')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Compat task', result.stdout)
+
+    def test_list_repo_flag_no_error(self):
+        result = self._run('list', '--repo', 'foo/bar')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Compat task', result.stdout)
+
+    def test_list_web_and_repo_together(self):
+        result = self._run('list', '--web', '--repo', 'foo/bar')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Compat task', result.stdout)
+
+    # --- view ---
+
+    def test_view_web_flag_no_error(self):
+        result = self._run('view', '1', '--web')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Compat task', result.stdout)
+
+    def test_view_repo_flag_no_error(self):
+        result = self._run('view', '1', '--repo', 'owner/repo')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Compat task', result.stdout)
+
+    # --- create ---
+
+    def test_create_web_flag_no_error(self):
+        result = self._run(
+            'create', '--title', 'Web task', '--body', 'body', '--web'
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_create_repo_flag_no_error(self):
+        result = self._run(
+            'create', '--title', 'Repo task', '--body', 'body',
+            '--repo', 'x/y',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    # --- status ---
+
+    def test_status_web_flag_no_error(self):
+        result = self._run('status', '--web')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Open tasks:', result.stdout)
+
+    def test_status_repo_flag_no_error(self):
+        result = self._run('status', '--repo', 'some/repo')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    # --- close / reopen ---
+
+    def test_close_web_flag_no_error(self):
+        result = self._run('close', '1', '--web')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_close_repo_flag_no_error(self):
+        # Re-create since previous test may have closed it.
+        run_cli(
+            ['create', '--title', 'Close compat', '--body', 'B'],
+            cwd=self.cwd,
+        )
+        # Get a fresh task number — could be 2, 3, etc. Just use the first
+        # created task that's still open; close 1 might already be closed.
+        result = run_cli(
+            ['create', '--title', 'To close', '--body', 'B'],
+            cwd=self.cwd,
+        )
+        self.assertEqual(result.returncode, 0)
+        # Extract task number from output "Created task #N at ..."
+        import re as _re
+        m = _re.search(r'#(\d+)', result.stdout)
+        num = m.group(1) if m else '1'
+        result = self._run('close', num, '--repo', 'r/r')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_reopen_web_flag_no_error(self):
+        self._run('close', '1')
+        result = self._run('reopen', '1', '--web')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    # --- comment ---
+
+    def test_comment_web_flag_no_error(self):
+        result = self._run('comment', '1', '--body', 'hi', '--web')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_comment_repo_flag_no_error(self):
+        result = self._run('comment', '1', '--body', 'hi2', '--repo', 'a/b')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    # --- init ---
+
+    def test_init_web_flag_no_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_cli(['init', '--web'], cwd=Path(tmp))
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_init_repo_flag_no_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_cli(['init', '--repo', 'foo/bar'], cwd=Path(tmp))
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    # --- no output change ---
+
+    def test_web_flag_does_not_affect_output(self):
+        """--web must not change list output."""
+        plain = self._run('list')
+        with_web = self._run('list', '--web')
+        self.assertEqual(plain.stdout, with_web.stdout)
+
+    def test_repo_flag_does_not_affect_output(self):
+        """--repo must not change list output."""
+        plain = self._run('list')
+        with_repo = self._run('list', '--repo', 'anything/here')
+        self.assertEqual(plain.stdout, with_repo.stdout)
+
+
 if __name__ == '__main__':
     unittest.main()

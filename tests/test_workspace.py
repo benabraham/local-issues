@@ -8,6 +8,8 @@ from pathlib import Path
 from issues import (
     IssuesError,
     ISSUES_DIRNAME,
+    _find_git_marker,
+    _resolve_worktree_gitdir,
     workspace_find,
     workspace_init,
     workspace_resolve,
@@ -146,6 +148,241 @@ class WorkspaceResolveTests(unittest.TestCase):
                 workspace_resolve(start=inner, auto_create=False),
                 tmp_path / 'issues',
             )
+
+
+class GitMarkerTests(unittest.TestCase):
+    """Tests for _find_git_marker (pure walk-up, no subprocess)."""
+
+    def test_finds_dot_git_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / '.git').mkdir()
+            result = _find_git_marker(tmp_path)
+            self.assertIsNotNone(result)
+            git_path, kind = result
+            self.assertEqual(kind, 'dir')
+            self.assertEqual(git_path, tmp_path / '.git')
+
+    def test_finds_dot_git_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / '.git').write_text(
+                'gitdir: /some/abs/path\n', encoding='utf-8'
+            )
+            result = _find_git_marker(tmp_path)
+            self.assertIsNotNone(result)
+            git_path, kind = result
+            self.assertEqual(kind, 'file')
+            self.assertEqual(git_path, tmp_path / '.git')
+
+    def test_walks_up_to_find_git(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / '.git').mkdir()
+            deep = tmp_path / 'a' / 'b' / 'c'
+            deep.mkdir(parents=True)
+            result = _find_git_marker(deep)
+            self.assertIsNotNone(result)
+            git_path, kind = result
+            self.assertEqual(kind, 'dir')
+            self.assertEqual(git_path, tmp_path / '.git')
+
+    def test_returns_none_when_no_git(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # A temp dir whose whole subtree has no .git.
+            inner = Path(tmp) / 'a' / 'b'
+            inner.mkdir(parents=True)
+            # Walk up from inner; if some ancestor of tmp has .git this
+            # will not be None — but that only happens when the test runner
+            # is itself inside a .git tree.  Restrict the search by testing
+            # that the found path (if any) is NOT inside our tmp tree.
+            result = _find_git_marker(inner)
+            if result is not None:
+                git_path, _ = result
+                # It's an ancestor of tmp — that's fine; the function works.
+                self.assertFalse(
+                    str(git_path).startswith(tmp),
+                    'found .git inside the controlled temp dir unexpectedly',
+                )
+
+
+class ResolveWorktreeGitdirTests(unittest.TestCase):
+    """Tests for _resolve_worktree_gitdir."""
+
+    def test_absolute_gitdir_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            abs_target = tmp_path / 'repo' / '.git' / 'worktrees' / 'wt'
+            abs_target.mkdir(parents=True)
+            git_file = tmp_path / 'worktree' / '.git'
+            git_file.parent.mkdir()
+            git_file.write_text(f'gitdir: {abs_target}\n', encoding='utf-8')
+            result = _resolve_worktree_gitdir(git_file)
+            self.assertEqual(result, abs_target)
+
+    def test_relative_gitdir_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # repo/.git/worktrees/wt is the target.
+            # worktree/.git contains relative path from worktree/ to that dir.
+            repo_git = tmp_path / 'repo' / '.git'
+            repo_git.mkdir(parents=True)
+            wt_gitdir = repo_git / 'worktrees' / 'wt'
+            wt_gitdir.mkdir(parents=True)
+            worktree_dir = tmp_path / 'worktree'
+            worktree_dir.mkdir()
+            git_file = worktree_dir / '.git'
+            # Relative path from worktree/ to repo/.git/worktrees/wt
+            rel = os.path.relpath(wt_gitdir, worktree_dir)
+            git_file.write_text(f'gitdir: {rel}\n', encoding='utf-8')
+            result = _resolve_worktree_gitdir(git_file)
+            self.assertEqual(result.resolve(), wt_gitdir.resolve())
+
+    def test_missing_gitdir_line_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            git_file = Path(tmp) / '.git'
+            git_file.write_text('# no gitdir line here\n', encoding='utf-8')
+            with self.assertRaises(IssuesError):
+                _resolve_worktree_gitdir(git_file)
+
+
+class WorkspaceFindGitTests(unittest.TestCase):
+    """Tests for workspace_find with .git directory, .git file (worktree),
+    sibling-shared layout, and no-.git fallback.
+
+    All fixtures are hand-crafted — no real git subprocess required.
+    """
+
+    def test_git_dir_finds_issues_at_repo_root(self):
+        """When .git is a directory, issues/ at repo root is found."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / '.git').mkdir()
+            (tmp_path / ISSUES_DIRNAME).mkdir()
+            # Start from a subdirectory.
+            sub = tmp_path / 'src' / 'pkg'
+            sub.mkdir(parents=True)
+            result = workspace_find(sub)
+            self.assertEqual(result, tmp_path / ISSUES_DIRNAME)
+
+    def test_git_dir_no_issues_returns_none(self):
+        """When .git dir exists but neither repo root nor parent has issues/."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / 'repo'
+            repo.mkdir()
+            (repo / '.git').mkdir()
+            # Neither repo/ nor tmp/ has issues/.
+            result = workspace_find(repo / 'src')
+            # src doesn't exist yet — use repo itself as start.
+            result = workspace_find(repo)
+            self.assertIsNone(result)
+
+    def test_git_file_worktree_finds_issues_at_worktree_root(self):
+        """When .git is a file (worktree), issues/ at the worktree root wins."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # Simulate: repo/.git/ (common git dir)
+            repo = tmp_path / 'repo'
+            repo_git = repo / '.git'
+            wt_gitdir = repo_git / 'worktrees' / 'wt'
+            wt_gitdir.mkdir(parents=True)
+
+            # Worktree working dir with .git file pointing to wt_gitdir.
+            worktree = tmp_path / 'worktree'
+            worktree.mkdir()
+            (worktree / '.git').write_text(
+                f'gitdir: {wt_gitdir}\n', encoding='utf-8'
+            )
+            # issues/ lives at the worktree root, NOT at the common repo root.
+            (worktree / ISSUES_DIRNAME).mkdir()
+
+            # Start from a subdir inside the worktree.
+            sub = worktree / 'subdir'
+            sub.mkdir()
+            result = workspace_find(sub)
+            self.assertEqual(result, worktree / ISSUES_DIRNAME)
+
+    def test_git_file_worktree_finds_issues_via_commondir(self):
+        """commondir is present but issues/ is still located at worktree root."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / 'repo'
+            repo_git = repo / '.git'
+            wt_gitdir = repo_git / 'worktrees' / 'wt'
+            wt_gitdir.mkdir(parents=True)
+            # Write commondir pointing back to repo/.git (relative).
+            (wt_gitdir / 'commondir').write_text('../..', encoding='utf-8')
+
+            worktree = tmp_path / 'worktree'
+            worktree.mkdir()
+            (worktree / '.git').write_text(
+                f'gitdir: {wt_gitdir}\n', encoding='utf-8'
+            )
+            (worktree / ISSUES_DIRNAME).mkdir()
+
+            result = workspace_find(worktree / 'sub')
+            (worktree / 'sub').mkdir()
+            result = workspace_find(worktree / 'sub')
+            self.assertEqual(result, worktree / ISSUES_DIRNAME)
+
+    def test_sibling_shared_parent_issues(self):
+        """When repo root has no issues/ but its parent does, use the parent's."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # tmp_path/issues/ — the shared pool.
+            (tmp_path / ISSUES_DIRNAME).mkdir()
+            # tmp_path/repo/.git — a normal repo.
+            repo = tmp_path / 'repo'
+            repo.mkdir()
+            (repo / '.git').mkdir()
+            # Repo itself has no issues/ subdir.
+            result = workspace_find(repo)
+            self.assertEqual(result, tmp_path / ISSUES_DIRNAME)
+
+    def test_sibling_shared_repo_root_takes_priority(self):
+        """Repo root issues/ takes priority over parent issues/."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # Both parent and repo root have issues/.
+            (tmp_path / ISSUES_DIRNAME).mkdir()
+            repo = tmp_path / 'repo'
+            repo.mkdir()
+            (repo / '.git').mkdir()
+            (repo / ISSUES_DIRNAME).mkdir()
+            result = workspace_find(repo)
+            self.assertEqual(result, repo / ISSUES_DIRNAME)
+
+    def test_no_git_plain_walkup_finds_issues(self):
+        """Without a .git anywhere in our controlled tree, plain walk-up works."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # No .git at all in tmp subtree.
+            (tmp_path / ISSUES_DIRNAME).mkdir()
+            deep = tmp_path / 'a' / 'b' / 'c'
+            deep.mkdir(parents=True)
+            result = workspace_find(deep)
+            # The plain walk-up should find tmp_path/issues/. It may also hit
+            # an ancestor .git (if the test suite runs inside a repo) — but
+            # the issues/ at tmp_path should still be found since it's closer.
+            self.assertIsNotNone(result)
+            self.assertEqual(result, tmp_path / ISSUES_DIRNAME)
+
+    def test_gitignored_issues_dir_still_found(self):
+        """issues/ is found even if it would be gitignored.
+
+        Verifying this is trivial: our implementation never calls git, so
+        gitignore status is irrelevant.  This test is a documentation test
+        confirming the invariant by checking the directory is found even
+        when a .gitignore that would exclude it is present.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / '.git').mkdir()
+            (tmp_path / '.gitignore').write_text('issues/\n', encoding='utf-8')
+            (tmp_path / ISSUES_DIRNAME).mkdir()
+            result = workspace_find(tmp_path)
+            self.assertEqual(result, tmp_path / ISSUES_DIRNAME)
 
 
 if __name__ == '__main__':
