@@ -1217,7 +1217,7 @@ def cli_cmd_list(args):
     return 0
 
 
-def cli_cmd_status(args):
+def cli_cmd_status(_args):
     issues_dir = workspace_resolve(auto_create=False)
     all_tasks = [task for task, _path in repo_list(issues_dir)]
     sys.stdout.write(output_status_text(all_tasks))
