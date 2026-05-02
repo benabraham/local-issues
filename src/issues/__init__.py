@@ -1759,6 +1759,8 @@ def cli_cmd_init(args):
 
 
 def cli_cmd_create(args):
+    if not args.title.strip():
+        raise IssuesError('--title must be non-empty')
     issues_dir = workspace_resolve(auto_create=True)
     body = _resolve_body(args)
     task, path = repo_create(

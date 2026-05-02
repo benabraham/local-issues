@@ -119,6 +119,39 @@ class SmokeTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
 
+    def test_create_empty_title_errors(self):
+        self._init()
+        result = run_cli(
+            ['create', '--title', '', '--body', 'b'],
+            cwd=self.cwd,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--title', result.stderr)
+
+    def test_create_whitespace_title_errors(self):
+        self._init()
+        result = run_cli(
+            ['create', '--title', '   ', '--body', 'b'],
+            cwd=self.cwd,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--title', result.stderr)
+
+    def test_create_tab_title_errors(self):
+        self._init()
+        result = run_cli(
+            ['create', '--title', '\t', '--body', 'b'],
+            cwd=self.cwd,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--title', result.stderr)
+
+    def test_create_empty_title_no_file_created(self):
+        self._init()
+        run_cli(['create', '--title', '', '--body', 'b'], cwd=self.cwd)
+        open_dir = self.cwd / 'issues' / 'open'
+        self.assertEqual(list(open_dir.iterdir()), [])
+
     def test_create_no_body_non_tty_errors(self):
         self._init()
         result = run_cli(
