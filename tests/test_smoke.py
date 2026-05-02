@@ -485,6 +485,27 @@ class CloseReopenSmokeTests(unittest.TestCase):
         self.assertIn('## Comments', content)
         self.assertIn('all done', content)
 
+    def test_close_reason_not_planned_with_space(self):
+        result = self._run('close', '1', '--reason', 'not planned')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        content = (
+            self.cwd / 'issues' / 'closed' / '001-close-me.md'
+        ).read_text(encoding='utf-8')
+        self.assertIn('stateReason: not_planned', content)
+
+    def test_close_reason_not_planned_underscore_still_works(self):
+        result = self._run('close', '1', '--reason', 'not_planned')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        content = (
+            self.cwd / 'issues' / 'closed' / '001-close-me.md'
+        ).read_text(encoding='utf-8')
+        self.assertIn('stateReason: not_planned', content)
+
+    def test_close_reason_invalid_errors(self):
+        result = self._run('close', '1', '--reason', 'wat')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('invalid --reason', result.stderr)
+
     def test_close_missing_task_errors(self):
         result = self._run('close', '999')
         self.assertNotEqual(result.returncode, 0)

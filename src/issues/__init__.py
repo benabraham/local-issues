@@ -1644,8 +1644,8 @@ def cli_build_parser():
     close_p = sub.add_parser('close', help='Close a task.', parents=[gh])
     close_p.add_argument('id', type=int)
     close_p.add_argument(
-        '--reason', choices=('completed', 'not_planned'), default='completed',
-        help='State reason (default: completed).',
+        '--reason', default='completed',
+        help='State reason: completed or not_planned (default: completed).',
     )
     close_p.add_argument(
         '--comment', default=None,
@@ -1842,17 +1842,37 @@ def cli_cmd_status(_args):
     return 0
 
 
+_VALID_CLOSE_REASONS = ('completed', 'not_planned')
+
+
+def _normalise_close_reason(raw):
+    """Normalise --reason: accept 'not planned' (with space) as 'not_planned'.
+
+    Returns the canonical reason string or raises IssuesError for invalid input.
+    """
+    if raw == 'not planned':
+        return 'not_planned'
+    if raw in _VALID_CLOSE_REASONS:
+        return raw
+    raise IssuesError(
+        f'invalid --reason {raw!r}; accepted values: '
+        + ', '.join(_VALID_CLOSE_REASONS)
+        + ' (or "not planned" with a space)'
+    )
+
+
 def cli_cmd_close(args):
     issues_dir = workspace_resolve(auto_create=False)
+    reason = _normalise_close_reason(args.reason)
     author = _get_git_author() if args.comment else None
     task, path = repo_close(
         issues_dir,
         args.id,
-        reason=args.reason,
+        reason=reason,
         comment_body=args.comment,
         comment_author=author,
     )
-    sys.stdout.write(f"Closed task #{task['number']} ({args.reason}) at {path}\n")
+    sys.stdout.write(f"Closed task #{task['number']} ({reason}) at {path}\n")
     return 0
 
 
