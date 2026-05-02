@@ -1598,7 +1598,7 @@ def cli_build_parser():
         '--label', '-l', action='append', default=[],
         help='Add a label (repeatable).',
     )
-    create_p.add_argument('--priority', '-p', type=int, default=None)
+    create_p.add_argument('--priority', type=int, default=None)
     create_p.add_argument(
         '--type', dest='task_type', choices=VALID_TYPES, default='task',
     )
@@ -1692,7 +1692,7 @@ def cli_build_parser():
         help='Remove a blocked-by dep (repeatable; no-op if absent).',
     )
     edit_p.add_argument(
-        '--priority', '-p', default=None, metavar='N',
+        '--priority', default=None, metavar='N',
         help='Set priority (integer). Pass `none` to clear.',
     )
 

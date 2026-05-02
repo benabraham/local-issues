@@ -111,6 +111,14 @@ class SmokeTests(unittest.TestCase):
         path = self.cwd / 'issues' / 'open' / '001-file-task.md'
         self.assertIn('Hello from a file.', path.read_text(encoding='utf-8'))
 
+    def test_create_short_p_flag_errors(self):
+        self._init()
+        result = run_cli(
+            ['create', '--title', 'p flag test', '-p', '3'],
+            cwd=self.cwd,
+        )
+        self.assertNotEqual(result.returncode, 0)
+
     def test_create_no_body_non_tty_errors(self):
         self._init()
         result = run_cli(
@@ -686,6 +694,10 @@ class EditSmokeTests(unittest.TestCase):
         result = self._run('edit', '1', '--priority', 'bad')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('priority', result.stderr.lower())
+
+    def test_edit_short_p_flag_errors(self):
+        result = self._run('edit', '1', '-p', '3')
+        self.assertNotEqual(result.returncode, 0)
 
 
 class DeleteSmokeTests(unittest.TestCase):
