@@ -760,17 +760,21 @@ class EditSmokeTests(unittest.TestCase):
     def test_edit_title(self):
         result = self._run('edit', '1', '--title', 'New title')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('title: New title', self._read_file())
+        # File is now renamed; use JSON to verify frontmatter.
+        view = self._run('view', '1', '--json')
+        d = json.loads(view.stdout)
+        self.assertEqual(d['title'], 'New title')
 
     def test_edit_title_add_label_priority_together(self):
         result = self._run(
             'edit', '1', '--title', 'Multi', '--add-label', 'bar', '--priority', '2',
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        content = self._read_file()
-        self.assertIn('title: Multi', content)
-        self.assertIn('bar', content)
-        self.assertIn('priority: 2', content)
+        view = self._run('view', '1', '--json')
+        d = json.loads(view.stdout)
+        self.assertEqual(d['title'], 'Multi')
+        self.assertIn('bar', d['labels'])
+        self.assertEqual(d['priority'], 2)
 
     def test_edit_add_and_remove_label(self):
         self._run('edit', '1', '--add-label', 'new')
@@ -826,6 +830,23 @@ class EditSmokeTests(unittest.TestCase):
         view = self._run('view', '1', '--json')
         d = json.loads(view.stdout)
         self.assertNotIn(9, d['blockedBy'])
+
+    def test_edit_title_renames_file(self):
+        result = self._run('edit', '1', '--title', 'renamed thing')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        new_path = self.cwd / 'issues' / 'open' / '001-renamed-thing.md'
+        old_path = self.cwd / 'issues' / 'open' / '001-edit-target.md'
+        self.assertTrue(new_path.exists())
+        self.assertFalse(old_path.exists())
+        content = new_path.read_text(encoding='utf-8')
+        self.assertIn('title: renamed thing', content)
+
+    def test_edit_title_same_slug_no_rename(self):
+        result = self._run('edit', '1', '--title', 'Edit target')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # File name unchanged (slug is the same).
+        old_path = self.cwd / 'issues' / 'open' / '001-edit-target.md'
+        self.assertTrue(old_path.exists())
 
     def test_edit_missing_task_errors(self):
         result = self._run('edit', '999', '--title', 'Ghost')

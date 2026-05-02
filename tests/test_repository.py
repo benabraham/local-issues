@@ -555,6 +555,27 @@ class RepoEditTests(IsolatedRepoTestCase):
         leftovers = [f for f in os.listdir(parent) if f.endswith('.tmp')]
         self.assertEqual(leftovers, [])
 
+    def test_edit_title_renames_file_to_new_slug(self):
+        task, orig_path = repo_create(self.issues_dir, title='Old name', body='b')
+        self.assertTrue(orig_path.exists())
+        _task, new_path = repo_edit(self.issues_dir, task['number'],
+                                    title='Renamed thing')
+        # Old file gone, new file exists.
+        self.assertFalse(orig_path.exists())
+        self.assertTrue(new_path.exists())
+        # ID prefix preserved.
+        self.assertTrue(new_path.name.startswith(f'{task["number"]:03d}-'))
+        # New slug derived from new title.
+        self.assertIn('renamed-thing', new_path.name)
+
+    def test_edit_title_same_slug_no_rename(self):
+        task, orig_path = repo_create(self.issues_dir, title='same slug', body='b')
+        _task, path = repo_edit(self.issues_dir, task['number'],
+                                title='same slug')
+        # File should be at the same path (no rename needed).
+        self.assertEqual(path, orig_path)
+        self.assertTrue(path.exists())
+
     def test_edit_missing_task_raises(self):
         with self.assertRaises(IssuesError):
             repo_edit(self.issues_dir, 999, title='Ghost')

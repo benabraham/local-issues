@@ -1043,8 +1043,10 @@ def repo_edit(issues_dir, number, *, title=None, body=None,
     """
     task, path = repo_read(issues_dir, number)
 
+    new_title = None
     if title is not None:
         task['title'] = title
+        new_title = title
 
     if body is not None:
         task['body'] = _normalise_body(body)
@@ -1072,6 +1074,19 @@ def repo_edit(issues_dir, number, *, title=None, body=None,
         task['priority'] = priority
 
     text = task_serialise(task)
+
+    # When title changed, re-derive slug and rename atomically if different.
+    if new_title is not None:
+        new_slug = task_slug(new_title)
+        m = _NUMBER_PREFIX_RE.match(path.name)
+        id_prefix = m.group(1) if m else f'{task["number"]:03d}'
+        new_filename = repo_format_filename(int(id_prefix), new_slug)
+        if new_filename != path.name:
+            new_path = path.parent / new_filename
+            _atomic_write_text(path, text)
+            os.rename(path, new_path)
+            return task, new_path
+
     _atomic_write_text(path, text)
     return task, path
 
