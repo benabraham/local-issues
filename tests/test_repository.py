@@ -25,7 +25,7 @@ from issues import (
 )
 
 
-class IsolatedRepoMixin:
+class IsolatedRepoTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -33,7 +33,7 @@ class IsolatedRepoMixin:
         self.issues_dir = workspace_init(self.base)
 
 
-class RepoBasicsTests(IsolatedRepoMixin, unittest.TestCase):
+class RepoBasicsTests(IsolatedRepoTestCase):
     def test_create_writes_file_and_next_id(self):
         task, path = repo_create(self.issues_dir, title='Hello world', body='b')
         self.assertEqual(task['number'], 1)
@@ -43,7 +43,7 @@ class RepoBasicsTests(IsolatedRepoMixin, unittest.TestCase):
 
     def test_create_increments_id(self):
         for n in range(1, 6):
-            task, path = repo_create(self.issues_dir, title=f'Task {n}', body='')
+            task, _ = repo_create(self.issues_dir, title=f'Task {n}', body='')
             self.assertEqual(task['number'], n)
         self.assertEqual(repo_read_next_id(self.issues_dir), 6)
 
@@ -91,7 +91,7 @@ class RepoBasicsTests(IsolatedRepoMixin, unittest.TestCase):
             repo_read(self.issues_dir, 999)
 
 
-class ConcurrentCreateTests(IsolatedRepoMixin, unittest.TestCase):
+class ConcurrentCreateTests(IsolatedRepoTestCase):
     def test_o_excl_collision_retries_with_next_id(self):
         # Pre-create a file at slot 1 with a *different* slug than what the
         # next create would produce, so the candidate-bump path is exercised.
@@ -167,7 +167,7 @@ class AtomicWriteTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / 'out.txt'
 
-            def boom(*args, **kwargs):
+            def boom(*_args, **_kwargs):
                 raise OSError('simulated rename failure')
 
             with mock.patch('issues.os.rename', side_effect=boom):
@@ -199,7 +199,7 @@ class MissingIssuesDirTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             issues_dir = Path(tmp) / 'issues'
             issues_dir.mkdir()
-            task, path = repo_create(issues_dir, title='first', body='')
+            task, _ = repo_create(issues_dir, title='first', body='')
             self.assertEqual(task['number'], 1)
             self.assertTrue((issues_dir / 'open').is_dir())
             self.assertTrue((issues_dir / 'closed').is_dir())
