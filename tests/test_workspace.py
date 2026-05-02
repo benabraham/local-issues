@@ -9,6 +9,7 @@ from issues import (
     IssuesError,
     ISSUES_DIRNAME,
     _find_git_marker,
+    _resolve_worktree_commondir,
     _resolve_worktree_gitdir,
     workspace_find,
     workspace_init,
@@ -380,6 +381,132 @@ class WorkspaceFindGitTests(unittest.TestCase):
             (tmp_path / ISSUES_DIRNAME).mkdir()
             result = workspace_find(tmp_path)
             self.assertEqual(result, tmp_path / ISSUES_DIRNAME)
+
+
+class WorktreeCommondirTests(unittest.TestCase):
+    """Tests for worktree→commondir fallback in workspace_find and the
+    _resolve_worktree_commondir helper.  All fixtures are synthesised on disk
+    — no real git subprocess is required.
+    """
+
+    def _make_worktree_fixture(self, tmp_path, *, with_commondir=True):
+        """Build the on-disk shape for a worktree scenario.
+
+        Layout:
+          tmp/
+            repo/
+              .git/
+                worktrees/
+                  wt/
+                    commondir   ← "../.." (relative, points to repo/.git)
+            worktree/           ← the worktree working dir
+              .git              ← file: "gitdir: <abs-path-to-repo/.git/worktrees/wt>"
+
+        Returns (repo, worktree, wt_gitdir).
+        """
+        repo = tmp_path / 'repo'
+        repo_git = repo / '.git'
+        wt_gitdir = repo_git / 'worktrees' / 'wt'
+        wt_gitdir.mkdir(parents=True)
+
+        if with_commondir:
+            # Relative path from wt_gitdir to repo/.git is "../.."
+            (wt_gitdir / 'commondir').write_text('../..', encoding='utf-8')
+
+        worktree = tmp_path / 'worktree'
+        worktree.mkdir()
+        (worktree / '.git').write_text(
+            f'gitdir: {wt_gitdir}\n', encoding='utf-8'
+        )
+        return repo, worktree, wt_gitdir
+
+    # ------------------------------------------------------------------
+    # 1. Worktree falls back to main repo's issues/ when it has none.
+    # ------------------------------------------------------------------
+
+    def test_worktree_finds_issues_at_main_repo_when_absent_from_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo, worktree, _ = self._make_worktree_fixture(tmp_path)
+
+            # Only the main repo has issues/.
+            (repo / ISSUES_DIRNAME).mkdir()
+
+            result = workspace_find(worktree / 'src')
+            # Create the src subdir so find has somewhere to start.
+            (worktree / 'src').mkdir()
+            result = workspace_find(worktree / 'src')
+            self.assertEqual(result, repo / ISSUES_DIRNAME)
+
+    # ------------------------------------------------------------------
+    # 2. Worktree-local issues/ wins over main repo's issues/.
+    # ------------------------------------------------------------------
+
+    def test_worktree_prefers_local_issues_over_main_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo, worktree, _ = self._make_worktree_fixture(tmp_path)
+
+            (repo / ISSUES_DIRNAME).mkdir()
+            (worktree / ISSUES_DIRNAME).mkdir()
+
+            result = workspace_find(worktree)
+            self.assertEqual(result, worktree / ISSUES_DIRNAME)
+
+    # ------------------------------------------------------------------
+    # 3. Sibling-shared layout visible from the worktree (parent of main repo).
+    # ------------------------------------------------------------------
+
+    def test_worktree_finds_issues_at_main_repo_parent_sibling_shared(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo, worktree, _ = self._make_worktree_fixture(tmp_path)
+
+            # issues/ is at tmp_path (parent of main repo, not inside repo).
+            (tmp_path / ISSUES_DIRNAME).mkdir()
+
+            (worktree / 'src').mkdir()
+            result = workspace_find(worktree / 'src')
+            self.assertEqual(result, tmp_path / ISSUES_DIRNAME)
+
+    # ------------------------------------------------------------------
+    # 4. No commondir file — gitdir itself acts as common dir (defensive).
+    # ------------------------------------------------------------------
+
+    def test_worktree_no_commondir_file_uses_gitdir_directly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo, worktree, wt_gitdir = self._make_worktree_fixture(
+                tmp_path, with_commondir=False
+            )
+            # Without commondir, main_repo_root == wt_gitdir.parent
+            # == repo/.git/worktrees.  Its parent is repo/.git, whose parent
+            # is repo.  But with no commondir the helper returns wt_gitdir
+            # itself, so main_repo_root = wt_gitdir.parent.
+            # We put issues/ at wt_gitdir.parent so it IS found.
+            main_repo_root_candidate = wt_gitdir.parent
+            (main_repo_root_candidate / ISSUES_DIRNAME).mkdir()
+
+            result = workspace_find(worktree)
+            self.assertEqual(
+                result, main_repo_root_candidate / ISSUES_DIRNAME
+            )
+
+    # ------------------------------------------------------------------
+    # 5. Unit test for _resolve_worktree_commondir with a relative path.
+    # ------------------------------------------------------------------
+
+    def test_resolve_worktree_commondir_relative_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # Simulate repo/.git/worktrees/wt/ with commondir = "../.."
+            repo_git = tmp_path / 'repo' / '.git'
+            wt_gitdir = repo_git / 'worktrees' / 'wt'
+            wt_gitdir.mkdir(parents=True)
+            (wt_gitdir / 'commondir').write_text('../..', encoding='utf-8')
+
+            result = _resolve_worktree_commondir(wt_gitdir)
+            self.assertEqual(result.resolve(), repo_git.resolve())
 
 
 if __name__ == '__main__':

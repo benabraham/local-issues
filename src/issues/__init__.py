@@ -101,17 +101,21 @@ class IssuesError(Exception):
 # Workspace
 # ---------------------------------------------------------------------------
 #
-# Full discovery algorithm (slice 6):
+# Full discovery algorithm:
 #
 #   1. Walk up from CWD looking for a `.git` (file or directory).
 #   2. If `.git` is a directory: repo root = parent of the `.git/` dir.
-#   3. If `.git` is a file: follow the `gitdir:` pointer (worktree
-#      indirection).  The *repo root* for our purposes is the parent of the
-#      `.git` file (i.e. the worktree's working directory) — NOT the common
-#      dir's parent.
-#   4. With repo root in hand, look for `issues/` at:
-#        a. repo root first
-#        b. parent of repo root (sibling-shared layout)
+#      Candidates: [repo_root, repo_root.parent].
+#   3. If `.git` is a file (worktree):
+#      a. Worktree root = parent of the `.git` file.
+#      b. Candidates start as [worktree_root, worktree_root.parent] — a
+#         per-worktree `issues/` always wins over the main repo's.
+#      c. Resolve the gitdir's `commondir` file to find the main repo's
+#         `.git` dir; derive main_repo_root = common_git_dir.parent.
+#      d. Append [main_repo_root, main_repo_root.parent] as fallbacks.
+#      e. Deduplicate the list (dict.fromkeys) to handle edge cases where
+#         worktree_root.parent == main_repo_root.
+#   4. Walk the deduplicated candidate list; return the first `issues/` found.
 #   5. If no `.git` is found anywhere up the tree, fall back to plain
 #      walk-up looking for `issues/` directly (slice 1 behaviour).
 #   6. Auto-create-on-write rules still apply when nothing is found.
@@ -157,16 +161,40 @@ def _resolve_worktree_gitdir(git_file):
     raise IssuesError(f'no gitdir: line found in {git_file}')
 
 
+def _resolve_worktree_commondir(gitdir):
+    """Return the absolute common-git-dir Path for a worktree gitdir.
+
+    Reads the ``commondir`` file inside *gitdir* if it exists.  The contents
+    may be a relative path (relative to *gitdir*) or an absolute path.  If the
+    ``commondir`` file is absent (defensive fallback), returns *gitdir* itself.
+
+    Pure function — no writes, no subprocess.
+    """
+    commondir_file = gitdir / 'commondir'
+    if not commondir_file.is_file():
+        return gitdir
+    raw = commondir_file.read_text(encoding='utf-8').strip()
+    if not raw:
+        return gitdir
+    path = Path(raw)
+    if not path.is_absolute():
+        path = (gitdir / path).resolve()
+    return path
+
+
 def workspace_find(start=None):
     """Walk up from `start` (default CWD) looking for an `issues/` dir.
 
-    Full algorithm (slice 6):
+    Full algorithm:
     - Find the nearest `.git` marker walking up from *start*.
     - For a ``.git`` directory: repo root = its parent.
-    - For a ``.git`` file (worktree): repo root = parent of the `.git`
-      file (the worktree's working-directory root).
-    - Check for ``issues/`` at repo root, then at repo root's parent
-      (sibling-shared layout).
+      Candidates: [repo_root, repo_root.parent].
+    - For a ``.git`` file (worktree): worktree root = parent of the `.git`
+      file.  Candidates start as [worktree_root, worktree_root.parent] (so a
+      per-worktree ``issues/`` still wins).  Then also resolve the gitdir's
+      ``commondir`` to find the main repo root, and append
+      [main_repo_root, main_repo_root.parent] as additional fallbacks.
+    - Candidates are deduplicated (preserving order) via dict.fromkeys.
     - If no ``.git`` is found: plain walk-up looking for ``issues/``
       directly (preserves slice 1 behaviour in non-git trees).
 
@@ -177,12 +205,26 @@ def workspace_find(start=None):
     result = _find_git_marker(cwd)
 
     if result is not None:
-        git_path, _ = result
-        # Repo root: parent of .git dir, or parent of .git file (worktree).
+        git_path, kind = result
         repo_root = git_path.parent
 
-        # Two candidate locations: repo root, then its parent.
-        for candidate_root in (repo_root, repo_root.parent):
+        if kind == 'dir':
+            candidates = [repo_root, repo_root.parent]
+        else:
+            # Worktree: .git is a file.  Prefer the worktree's own tree, then
+            # fall back to the main repo tree via commondir.
+            worktree_root = repo_root
+            candidates = [worktree_root, worktree_root.parent]
+            try:
+                gitdir = _resolve_worktree_gitdir(git_path)
+                common_git_dir = _resolve_worktree_commondir(gitdir)
+                main_repo_root = common_git_dir.parent
+                candidates += [main_repo_root, main_repo_root.parent]
+            except IssuesError:
+                pass  # malformed .git file — stick with worktree candidates
+
+        # Deduplicate while preserving priority order.
+        for candidate_root in dict.fromkeys(candidates):
             issues_dir = candidate_root / ISSUES_DIRNAME
             if issues_dir.is_dir():
                 return issues_dir
