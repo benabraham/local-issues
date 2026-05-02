@@ -42,6 +42,13 @@ VALID_TYPES = ('task', 'prd')
 VALID_STATES = ('open', 'closed')
 VALID_STATE_REASONS = (None, 'completed', 'not_planned', 'reopened')
 
+# Valid JSON output fields (camelCase). Superset of TASK_FIELDS + body + comments.
+# Keep in sync with task_to_json_dict.
+JSON_FIELDS = (
+    'number', 'title', 'type', 'parent', 'labels', 'blockedBy', 'priority',
+    'state', 'stateReason', 'createdAt', 'closedAt', 'assignees', 'body', 'comments',
+)
+
 # Frontmatter field order — also defines the JSON schema field set.
 TASK_FIELDS = (
     'number',
@@ -1512,9 +1519,45 @@ def output_view_text(task):
     return '\n'.join(lines) + '\n'
 
 
-def output_view_json(task):
-    """Render a task as gh-shaped JSON (camelCase)."""
-    return json.dumps(task_to_json_dict(task), indent=2, ensure_ascii=False) + '\n'
+def _parse_json_fields(fields_str):
+    """Parse the --json fields string into an ordered list of field names.
+
+    `fields_str` is '' (empty) for full output, or 'field1,field2,...' for
+    a filtered subset.  Raises IssuesError on unknown field names.
+
+    Returns a list of field names (possibly empty = all fields).
+    """
+    if not fields_str:
+        return []
+    valid = set(JSON_FIELDS)
+    fields = [f.strip() for f in fields_str.split(',') if f.strip()]
+    unknown = [f for f in fields if f not in valid]
+    if unknown:
+        raise IssuesError(
+            f"unknown JSON field {unknown[0]!r}; "
+            f"valid fields: {', '.join(JSON_FIELDS)}"
+        )
+    return fields
+
+
+def _filter_json_dict(d, fields):
+    """Return a new dict with only the keys in `fields`, in that order.
+
+    If `fields` is empty, returns `d` unchanged.
+    """
+    if not fields:
+        return d
+    return {k: d[k] for k in fields if k in d}
+
+
+def output_view_json(task, fields=None):
+    """Render a task as gh-shaped JSON (camelCase).
+
+    If `fields` is a non-empty list, only those keys are included in the
+    output, in the order given.
+    """
+    d = _filter_json_dict(task_to_json_dict(task), fields or [])
+    return json.dumps(d, indent=2, ensure_ascii=False) + '\n'
 
 
 def output_comments_text(comments):
@@ -1585,10 +1628,13 @@ def output_list_text(tasks):
     return '\n'.join(lines) + '\n'
 
 
-def output_list_json(tasks):
-    """Render a list of tasks as a gh-shaped JSON array (camelCase)."""
+def output_list_json(tasks, fields=None):
+    """Render a list of tasks as a gh-shaped JSON array (camelCase).
+
+    If `fields` is a non-empty list, only those keys are included per item.
+    """
     return json.dumps(
-        [task_to_json_dict(t) for t in tasks],
+        [_filter_json_dict(task_to_json_dict(t), fields or []) for t in tasks],
         indent=2,
         ensure_ascii=False,
     ) + '\n'
@@ -1678,7 +1724,11 @@ def cli_build_parser():
 
     view_p = sub.add_parser('view', help='View a task.', parents=[gh])
     view_p.add_argument('id', type=int)
-    view_p.add_argument('--json', action='store_true', dest='as_json')
+    view_p.add_argument(
+        '--json', nargs='?', const='', default=None, dest='as_json',
+        metavar='FIELDS',
+        help='Output as JSON. Optional comma-separated field list (e.g. number,title,state).',
+    )
     view_p.add_argument(
         '--comments', '-c', action='store_true', dest='show_comments',
         help='Render comments inline (text mode only; JSON always includes comments).',
@@ -1703,8 +1753,9 @@ def cli_build_parser():
         help='Show only ready tasks (open, not PRD, all blockers closed).',
     )
     list_p.add_argument(
-        '--json', action='store_true', dest='as_json',
-        help='Output as JSON array.',
+        '--json', nargs='?', const='', default=None, dest='as_json',
+        metavar='FIELDS',
+        help='Output as JSON array. Optional comma-separated field list.',
     )
 
     sub.add_parser('status', help='Show open/closed task counts.', parents=[gh])
@@ -1887,8 +1938,9 @@ def _resolve_body(args):
 def cli_cmd_view(args):
     issues_dir = workspace_resolve(auto_create=False)
     task, _ = repo_read(issues_dir, args.id)
-    if args.as_json:
-        sys.stdout.write(output_view_json(task))
+    if args.as_json is not None:
+        fields = _parse_json_fields(args.as_json)
+        sys.stdout.write(output_view_json(task, fields))
     else:
         text = output_view_text(task)
         if getattr(args, 'show_comments', False):
@@ -1912,8 +1964,9 @@ def cli_cmd_list(args):
             labels=args.label or [],
         )
         sorted_tasks = sorted(filtered, key=query_sort_key)
-    if args.as_json:
-        sys.stdout.write(output_list_json(sorted_tasks))
+    if args.as_json is not None:
+        fields = _parse_json_fields(args.as_json)
+        sys.stdout.write(output_list_json(sorted_tasks, fields))
     else:
         sys.stdout.write(output_list_text(sorted_tasks))
     return 0

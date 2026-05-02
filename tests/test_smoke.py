@@ -290,6 +290,37 @@ class SmokeTests(unittest.TestCase):
         d = json.loads(result.stdout)
         self.assertIn('comments', d)
 
+    def test_view_json_fields_filter(self):
+        self._init()
+        run_cli(['create', '--title', 'Fields test', '--body', 'Body.'],
+                cwd=self.cwd)
+        result = run_cli(['view', '1', '--json', 'number,title,state'],
+                         cwd=self.cwd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        d = json.loads(result.stdout)
+        self.assertIn('number', d)
+        self.assertIn('title', d)
+        self.assertIn('state', d)
+        self.assertNotIn('labels', d)
+        self.assertNotIn('body', d)
+
+    def test_view_json_fields_order_preserved(self):
+        self._init()
+        run_cli(['create', '--title', 'Order test', '--body', 'B.'], cwd=self.cwd)
+        result = run_cli(['view', '1', '--json', 'state,number,title'],
+                         cwd=self.cwd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        d = json.loads(result.stdout)
+        keys = list(d.keys())
+        self.assertEqual(keys, ['state', 'number', 'title'])
+
+    def test_view_json_unknown_field_errors(self):
+        self._init()
+        run_cli(['create', '--title', 'Unknown test', '--body', 'B.'], cwd=self.cwd)
+        result = run_cli(['view', '1', '--json', 'number,wat'], cwd=self.cwd)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('unknown JSON field', result.stderr)
+
     def test_view_missing_errors(self):
         self._init()
         result = run_cli(['view', '999'], cwd=self.cwd)
@@ -462,6 +493,22 @@ class ListSmokeTests(unittest.TestCase):
         with_priority = [item for item in data if item['priority'] is not None]
         if with_priority:
             self.assertEqual(with_priority[0]['priority'], 0)
+
+    def test_list_json_fields_filter(self):
+        result = self._run('list', '--json', 'number,title')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertIsInstance(data, list)
+        for item in data:
+            self.assertIn('number', item)
+            self.assertIn('title', item)
+            self.assertNotIn('labels', item)
+            self.assertNotIn('state', item)
+
+    def test_list_json_unknown_field_errors(self):
+        result = self._run('list', '--json', 'number,bogus')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('unknown JSON field', result.stderr)
 
     # --- status ---
 
