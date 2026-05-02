@@ -1028,6 +1028,13 @@ class NextSmokeTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('cycle', result.stderr.lower())
 
+    def test_edit_add_blocked_by_cycle_error_includes_path(self):
+        """Cycle rejection error must include the cycle path."""
+        result = self._run('edit', '1', '--add-blocked-by', '2')
+        self.assertNotEqual(result.returncode, 0)
+        # Error must mention the path: something like 1 -> 2 -> 1
+        self.assertIn('->', result.stderr)
+
     def test_edit_add_blocked_by_no_cycle_succeeds(self):
         """Adding a non-cycling edge is accepted."""
         # Create task 6 with no blockers, then make it block C=3.

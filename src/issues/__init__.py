@@ -1272,24 +1272,37 @@ def query_would_introduce_cycle(tasks, source_id, new_blocker_id):
 
     Pure: no I/O.
     """
-    if source_id == new_blocker_id:
-        return True
-    by_number = {t['number']: t for t in tasks}
-    # BFS/DFS from new_blocker_id; if we reach source_id, a cycle would form.
-    visited = set()
-    stack = [new_blocker_id]
-    while stack:
-        node = stack.pop()
-        if node == source_id:
-            return True
-        if node in visited:
-            continue
-        visited.add(node)
-        if node in by_number:
-            for blocker_id in (by_number[node].get('blocked_by') or []):
-                if blocker_id not in visited:
-                    stack.append(blocker_id)
-    return False
+    return query_cycle_path_for_edge(tasks, source_id, new_blocker_id) is not None
+
+
+def query_cycle_path_for_edge(tasks, source_id, new_blocker_id):
+    """Return the cycle path (list of IDs) that would result from adding
+    source_id -> new_blocker_id, or None if no cycle would form.
+
+    This simulates adding the edge to the graph and running cycle detection,
+    so the path format matches query_detect_cycle exactly (start repeated at end).
+    Pure: no I/O.
+    """
+    # Build a temporary task list with the proposed edge added.
+    patched = []
+    source_found = False
+    for t in tasks:
+        if t['number'] == source_id:
+            tc = dict(t)
+            tc['blocked_by'] = list(t.get('blocked_by') or [])
+            if new_blocker_id not in tc['blocked_by']:
+                tc['blocked_by'] = tc['blocked_by'] + [new_blocker_id]
+            patched.append(tc)
+            source_found = True
+        else:
+            patched.append(t)
+    if not source_found:
+        # source_id not in tasks: add a stub so the cycle detector can see the edge.
+        patched.append({
+            'number': source_id,
+            'blocked_by': [new_blocker_id],
+        })
+    return query_detect_cycle(patched)
 
 
 def query_next(tasks, labels=()):
@@ -1985,10 +1998,12 @@ def cli_cmd_edit(args):
     if args.add_blocked_by:
         all_tasks = [t for t, _p in repo_list(issues_dir)]
         for new_blocker in args.add_blocked_by:
-            if query_would_introduce_cycle(all_tasks, args.id, new_blocker):
+            cycle = query_cycle_path_for_edge(all_tasks, args.id, new_blocker)
+            if cycle is not None:
+                path_str = ' -> '.join(str(n) for n in cycle)
                 raise IssuesError(
                     f'adding --add-blocked-by {new_blocker} to task #{args.id} '
-                    f'would introduce a cycle in the blockedBy graph'
+                    f'would introduce a cycle in blockedBy: {path_str}'
                 )
 
     task, path = repo_edit(
