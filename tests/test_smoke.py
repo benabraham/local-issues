@@ -864,7 +864,6 @@ class NextSmokeTests(unittest.TestCase):
 
     def test_edit_add_blocked_by_no_write_on_cycle(self):
         """File must not be modified when cycle is rejected."""
-        _, path_before = run_cli(['view', '1', '--json'], cwd=self.cwd), None
         view_before = self._run('view', '1', '--json')
         d_before = json.loads(view_before.stdout)
         # Attempt to create cycle (should fail).

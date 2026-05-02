@@ -667,8 +667,8 @@ class RepoCascadeDeleteTests(IsolatedRepoTestCase):
         """IDs are never reused — .next-id must not be decremented."""
         prd, _ = repo_create(self.issues_dir, title='PRD', body='b',
                               task_type='prd')
-        child, _ = repo_create(self.issues_dir, title='Child', body='b',
-                                parent=prd['number'])
+        repo_create(self.issues_dir, title='Child', body='b',
+                    parent=prd['number'])
         next_id_before = repo_read_next_id(self.issues_dir)
         repo_cascade_delete(self.issues_dir, prd['number'])
         next_id_after = repo_read_next_id(self.issues_dir)
