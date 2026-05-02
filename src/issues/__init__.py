@@ -1448,7 +1448,7 @@ def cli_cmd_comment(args):
     issues_dir = workspace_resolve(auto_create=False)
     body = _resolve_body(args)
     author = _get_git_author()
-    task, path = repo_append_comment(issues_dir, args.id, body=body, author=author)
+    task, _ = repo_append_comment(issues_dir, args.id, body=body, author=author)
     sys.stdout.write(f"Added comment to task #{task['number']}\n")
     return 0
 
