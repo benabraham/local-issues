@@ -1489,6 +1489,22 @@ def output_view_json(task):
     return json.dumps(task_to_json_dict(task), indent=2, ensure_ascii=False) + '\n'
 
 
+def output_comments_text(comments):
+    """Render a list of comment dicts as human-readable text.
+
+    Each comment shows a separator line, then timestamp, author, and body.
+    Returns an empty string if there are no comments.
+    """
+    if not comments:
+        return ''
+    lines = ['', '-- Comments --']
+    for c in comments:
+        lines.append('')
+        lines.append(f"{c['timestamp']}  {c['author']}")
+        lines.append(c.get('body', '').strip())
+    return '\n'.join(lines) + '\n'
+
+
 def output_create_summary(task, path):
     return f"Created task #{task['number']} at {path}\n"
 
@@ -1635,6 +1651,10 @@ def cli_build_parser():
     view_p = sub.add_parser('view', help='View a task.', parents=[gh])
     view_p.add_argument('id', type=int)
     view_p.add_argument('--json', action='store_true', dest='as_json')
+    view_p.add_argument(
+        '--comments', '-c', action='store_true', dest='show_comments',
+        help='Render comments inline (text mode only; JSON always includes comments).',
+    )
 
     list_p = sub.add_parser('list', help='List tasks.', parents=[gh])
     list_p.add_argument(
@@ -1842,7 +1862,11 @@ def cli_cmd_view(args):
     if args.as_json:
         sys.stdout.write(output_view_json(task))
     else:
-        sys.stdout.write(output_view_text(task))
+        text = output_view_text(task)
+        if getattr(args, 'show_comments', False):
+            comments = task_parse_comments(task.get('comments_raw', ''))
+            text = text.rstrip('\n') + output_comments_text(comments)
+        sys.stdout.write(text)
     return 0
 
 

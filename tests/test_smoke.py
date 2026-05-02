@@ -254,6 +254,42 @@ class SmokeTests(unittest.TestCase):
         for key in d:
             self.assertNotIn('_', key)
 
+    def test_view_no_comments_flag_hides_comments(self):
+        self._init()
+        run_cli(['create', '--title', 'With comment', '--body', 'Body.'],
+                cwd=self.cwd)
+        run_cli(['comment', '1', '--body', 'A comment'], cwd=self.cwd)
+        result = run_cli(['view', '1'], cwd=self.cwd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('A comment', result.stdout)
+
+    def test_view_comments_flag_shows_comments(self):
+        self._init()
+        run_cli(['create', '--title', 'With comment', '--body', 'Body.'],
+                cwd=self.cwd)
+        run_cli(['comment', '1', '--body', 'Visible comment'], cwd=self.cwd)
+        result = run_cli(['view', '1', '--comments'], cwd=self.cwd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Visible comment', result.stdout)
+
+    def test_view_comments_short_flag(self):
+        self._init()
+        run_cli(['create', '--title', 'Short flag test', '--body', 'Body.'],
+                cwd=self.cwd)
+        run_cli(['comment', '1', '--body', 'Short flag comment'], cwd=self.cwd)
+        result = run_cli(['view', '1', '-c'], cwd=self.cwd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Short flag comment', result.stdout)
+
+    def test_view_comments_json_mode_accepted(self):
+        self._init()
+        run_cli(['create', '--title', 'JSON mode', '--body', 'Body.'],
+                cwd=self.cwd)
+        result = run_cli(['view', '1', '--comments', '--json'], cwd=self.cwd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        d = json.loads(result.stdout)
+        self.assertIn('comments', d)
+
     def test_view_missing_errors(self):
         self._init()
         result = run_cli(['view', '999'], cwd=self.cwd)
