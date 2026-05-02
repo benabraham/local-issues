@@ -286,6 +286,22 @@ class ListSmokeTests(unittest.TestCase):
         self.assertIn('TITLE', result.stdout)
         self.assertNotIn('Task one', result.stdout)
 
+    def test_list_state_short_flag_s_open(self):
+        result = self._run('list', '-s', 'open')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Task one', result.stdout)
+
+    def test_list_state_short_flag_s_closed(self):
+        result = self._run('list', '-s', 'closed')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('TITLE', result.stdout)
+        self.assertNotIn('Task one', result.stdout)
+
+    def test_list_state_short_flag_s_all(self):
+        result = self._run('list', '-s', 'all')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Task one', result.stdout)
+
     def test_list_without_workspace_errors(self):
         import tempfile as _tmpfile
         with _tmpfile.TemporaryDirectory() as empty:

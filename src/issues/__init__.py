@@ -1622,7 +1622,7 @@ def cli_build_parser():
         help='Filter by label (repeatable; AND semantics).',
     )
     list_p.add_argument(
-        '--state', choices=('open', 'closed', 'all'), default='open',
+        '--state', '-s', choices=('open', 'closed', 'all'), default='open',
         help='Filter by state (default: open).',
     )
     list_p.add_argument(
