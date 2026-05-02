@@ -561,6 +561,34 @@ class CloseReopenSmokeTests(unittest.TestCase):
         self.assertIn('stateReason: reopened', content)
         self.assertIn('closedAt: null', content)
 
+    def test_reopen_with_comment_long_form(self):
+        self._run('close', '1')
+        result = self._run('reopen', '1', '--comment', 'back in business')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        view = self._run('view', '1', '--json')
+        d = json.loads(view.stdout)
+        self.assertEqual(d['state'], 'OPEN')
+        self.assertEqual(len(d['comments']), 1)
+        self.assertEqual(d['comments'][0]['body'], 'back in business')
+
+    def test_reopen_with_comment_short_form(self):
+        self._run('close', '1')
+        result = self._run('reopen', '1', '-c', 'short comment')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        view = self._run('view', '1', '--json')
+        d = json.loads(view.stdout)
+        self.assertEqual(len(d['comments']), 1)
+        self.assertEqual(d['comments'][0]['body'], 'short comment')
+
+    def test_close_with_comment_short_form(self):
+        result = self._run('close', '1', '-c', 'closing note')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        view = self._run('view', '1', '--json')
+        d = json.loads(view.stdout)
+        self.assertEqual(d['state'], 'CLOSED')
+        self.assertEqual(len(d['comments']), 1)
+        self.assertEqual(d['comments'][0]['body'], 'closing note')
+
     def test_reopen_missing_task_errors(self):
         result = self._run('reopen', '999')
         self.assertNotEqual(result.returncode, 0)

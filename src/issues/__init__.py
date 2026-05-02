@@ -956,20 +956,32 @@ def repo_close(issues_dir, number, *, reason='completed',
     return task, final_path
 
 
-def repo_reopen(issues_dir, number):
+def repo_reopen(issues_dir, number, *, comment_body=None, comment_author=None):
     """Reopen a closed task: update frontmatter + move closed/→open/ via rename(2).
 
     Writes the updated content to a temp file in `open/`, renames it into
     place (atomic), then unlinks the original from `closed/`.  Sets
     `state: open`, `stateReason: reopened`, `closedAt: null`.  Raises
     IssuesError if already open.
+
+    Optional `comment_body` appends a comment in the same operation, using
+    the same author/timestamp logic as repo_close.
     """
     task, closed_path = repo_read(issues_dir, number)
     if task['state'] == 'open':
         raise IssuesError(f'task #{number} is already open')
+    now = _now_iso()
     task['state'] = 'open'
     task['state_reason'] = 'reopened'
     task['closed_at'] = None
+    if comment_body:
+        comments = task_parse_comments(task.get('comments_raw', ''))
+        comments.append({
+            'timestamp': now,
+            'author': comment_author or 'unknown',
+            'body': comment_body,
+        })
+        task['comments_raw'] = task_comments_to_raw(comments)
     text = task_serialise(task)
     open_dir = repo_open_dir(issues_dir)
     open_dir.mkdir(parents=True, exist_ok=True)
@@ -1656,13 +1668,17 @@ def cli_build_parser():
         help='State reason: completed or not_planned (default: completed).',
     )
     close_p.add_argument(
-        '--comment', default=None,
+        '--comment', '-c', default=None,
         help='Optional comment to append in the same operation.',
     )
 
     reopen_p = sub.add_parser('reopen', help='Reopen a closed task.',
                                parents=[gh])
     reopen_p.add_argument('id', type=int)
+    reopen_p.add_argument(
+        '--comment', '-c', default=None,
+        help='Optional comment to append in the same operation.',
+    )
 
     comment_p = sub.add_parser('comment', help='Add a comment to a task.',
                                 parents=[gh])
@@ -1894,7 +1910,12 @@ def cli_cmd_close(args):
 
 def cli_cmd_reopen(args):
     issues_dir = workspace_resolve(auto_create=False)
-    task, path = repo_reopen(issues_dir, args.id)
+    author = _get_git_author() if args.comment else None
+    task, path = repo_reopen(
+        issues_dir, args.id,
+        comment_body=args.comment,
+        comment_author=author,
+    )
     sys.stdout.write(f"Reopened task #{task['number']} at {path}\n")
     return 0
 
