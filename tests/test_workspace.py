@@ -432,8 +432,6 @@ class WorktreeCommondirTests(unittest.TestCase):
             # Only the main repo has issues/.
             (repo / ISSUES_DIRNAME).mkdir()
 
-            result = workspace_find(worktree / 'src')
-            # Create the src subdir so find has somewhere to start.
             (worktree / 'src').mkdir()
             result = workspace_find(worktree / 'src')
             self.assertEqual(result, repo / ISSUES_DIRNAME)
@@ -460,7 +458,7 @@ class WorktreeCommondirTests(unittest.TestCase):
     def test_worktree_finds_issues_at_main_repo_parent_sibling_shared(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            repo, worktree, _ = self._make_worktree_fixture(tmp_path)
+            _, worktree, _ = self._make_worktree_fixture(tmp_path)
 
             # issues/ is at tmp_path (parent of main repo, not inside repo).
             (tmp_path / ISSUES_DIRNAME).mkdir()
@@ -476,7 +474,7 @@ class WorktreeCommondirTests(unittest.TestCase):
     def test_worktree_no_commondir_file_uses_gitdir_directly(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            repo, worktree, wt_gitdir = self._make_worktree_fixture(
+            _, worktree, wt_gitdir = self._make_worktree_fixture(
                 tmp_path, with_commondir=False
             )
             # Without commondir, main_repo_root == wt_gitdir.parent
