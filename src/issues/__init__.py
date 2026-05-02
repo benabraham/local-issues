@@ -414,18 +414,68 @@ def _yaml_parse_frontmatter(fm_text):
 
 
 _COMMENTS_HEADING_RE = re.compile(r'^##\s+Comments\s*$', re.MULTILINE)
+_COMMENT_HEADER_RE = re.compile(
+    r'^###\s+(\S+)\s+—\s+(.+?)\s*$', re.MULTILINE
+)
 
 
 def _split_comments(body):
     """Split body at the first `## Comments` heading.
 
     Returns (body_before, comments_raw_including_heading) — or (body, '') if
-    no comments section.
+    no comments section.  `body_before` is normalised to end in exactly one
+    `\\n` (or be empty) so that adding a comments section and re-parsing does
+    not accumulate extra blank lines between the body and the heading.
     """
     m = _COMMENTS_HEADING_RE.search(body)
     if not m:
         return body, ''
-    return body[: m.start()], body[m.start():]
+    body_before = body[: m.start()].rstrip('\n')
+    if body_before:
+        body_before += '\n'
+    return body_before, body[m.start():]
+
+
+def task_parse_comments(comments_raw):
+    """Parse the comments_raw string into a list of comment dicts.
+
+    Each comment dict has keys: timestamp (str), author (str), body (str).
+    Malformed `###` headers (those not matching `### TIMESTAMP — AUTHOR`)
+    are silently skipped. An empty or missing comments_raw returns [].
+    """
+    if not comments_raw:
+        return []
+    comments = []
+    headers = list(_COMMENT_HEADER_RE.finditer(comments_raw))
+    for i, m in enumerate(headers):
+        timestamp = m.group(1)
+        author = m.group(2)
+        start = m.end()
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(comments_raw)
+        body = comments_raw[start:end].strip()
+        comments.append({'timestamp': timestamp, 'author': author, 'body': body})
+    return comments
+
+
+def task_comments_to_raw(comments):
+    """Serialise a list of comment dicts to a comments_raw string.
+
+    Returns '' if `comments` is empty; otherwise returns a string starting
+    with `## Comments` and containing one `### timestamp — author` h3 per
+    comment. The round-trip `task_parse_comments(task_comments_to_raw(c))`
+    is identity for well-formed inputs.
+    """
+    if not comments:
+        return ''
+    lines = ['## Comments']
+    for c in comments:
+        lines.append('')
+        lines.append(f"### {c['timestamp']} — {c['author']}")
+        lines.append('')
+        body = c['body'].strip() if c.get('body') else ''
+        if body:
+            lines.append(body)
+    return '\n'.join(lines) + '\n'
 
 
 def task_serialise(task):
@@ -509,6 +559,21 @@ def _now_iso():
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
+def _get_git_author():
+    """Derive comment author: git config user.name → $USER → 'unknown'."""
+    try:
+        result = subprocess.run(
+            ['git', 'config', 'user.name'],
+            capture_output=True, text=True, timeout=5,
+        )
+        name = result.stdout.strip()
+        if name:
+            return name
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return os.environ.get('USER') or 'unknown'
+
+
 # ---------------------------------------------------------------------------
 # Task — JSON view
 # ---------------------------------------------------------------------------
@@ -540,7 +605,7 @@ def task_to_json_dict(task):
         'type': task.get('type'),
         'blocked_by': list(task.get('blocked_by') or []),
     })
-    out['comments'] = []  # slice 4 will populate
+    out['comments'] = task_parse_comments(task.get('comments_raw', ''))
     return out
 
 
@@ -757,6 +822,111 @@ def repo_list(issues_dir):
                 continue
             results.append((task, path))
     return results
+
+
+def repo_close(issues_dir, number, *, reason='completed',
+               comment_body=None, comment_author=None):
+    """Close a task: update frontmatter + move open/→closed/ via rename(2).
+
+    Writes the updated content to a temp file in `closed/`, renames it into
+    place (atomic), then unlinks the original from `open/`.  Between the two
+    syscalls the file briefly exists in both dirs — acceptable under last-
+    write-wins semantics.
+
+    Optional `comment_body` appends a comment in the same operation using the
+    same timestamp as `closedAt`.  Raises IssuesError if already closed.
+    """
+    task, open_path = repo_read(issues_dir, number)
+    if task['state'] == 'closed':
+        raise IssuesError(f'task #{number} is already closed')
+    now = _now_iso()
+    task['state'] = 'closed'
+    task['state_reason'] = reason
+    task['closed_at'] = now
+    if comment_body:
+        comments = task_parse_comments(task.get('comments_raw', ''))
+        comments.append({
+            'timestamp': now,
+            'author': comment_author or 'unknown',
+            'body': comment_body,
+        })
+        task['comments_raw'] = task_comments_to_raw(comments)
+    text = task_serialise(task)
+    closed_dir = repo_closed_dir(issues_dir)
+    closed_dir.mkdir(parents=True, exist_ok=True)
+    final_path = closed_dir / open_path.name
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f'.{open_path.name}.', suffix='.tmp', dir=str(closed_dir),
+    )
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+            fh.write(text)
+        os.rename(tmp_name, final_path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+    try:
+        os.unlink(open_path)
+    except OSError:
+        pass
+    return task, final_path
+
+
+def repo_reopen(issues_dir, number):
+    """Reopen a closed task: update frontmatter + move closed/→open/ via rename(2).
+
+    Writes the updated content to a temp file in `open/`, renames it into
+    place (atomic), then unlinks the original from `closed/`.  Sets
+    `state: open`, `stateReason: reopened`, `closedAt: null`.  Raises
+    IssuesError if already open.
+    """
+    task, closed_path = repo_read(issues_dir, number)
+    if task['state'] == 'open':
+        raise IssuesError(f'task #{number} is already open')
+    task['state'] = 'open'
+    task['state_reason'] = 'reopened'
+    task['closed_at'] = None
+    text = task_serialise(task)
+    open_dir = repo_open_dir(issues_dir)
+    open_dir.mkdir(parents=True, exist_ok=True)
+    final_path = open_dir / closed_path.name
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f'.{closed_path.name}.', suffix='.tmp', dir=str(open_dir),
+    )
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+            fh.write(text)
+        os.rename(tmp_name, final_path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+    try:
+        os.unlink(closed_path)
+    except OSError:
+        pass
+    return task, final_path
+
+
+def repo_append_comment(issues_dir, number, *, body, author):
+    """Append a comment to a task's body, writing atomically in-place.
+
+    The task may be in open/ or closed/; the file stays in its current
+    location.  Returns (updated_task, path).
+    """
+    task, path = repo_read(issues_dir, number)
+    now = _now_iso()
+    comments = task_parse_comments(task.get('comments_raw', ''))
+    comments.append({'timestamp': now, 'author': author, 'body': body})
+    task['comments_raw'] = task_comments_to_raw(comments)
+    text = task_serialise(task)
+    _atomic_write_text(path, text)
+    return task, path
 
 
 # ---------------------------------------------------------------------------
@@ -1118,6 +1288,29 @@ def cli_build_parser():
 
     _sub = sub.add_parser('status', help='Show open/closed task counts.')
 
+    close_p = sub.add_parser('close', help='Close a task.')
+    close_p.add_argument('id', type=int)
+    close_p.add_argument(
+        '--reason', choices=('completed', 'not_planned'), default='completed',
+        help='State reason (default: completed).',
+    )
+    close_p.add_argument(
+        '--comment', default=None,
+        help='Optional comment to append in the same operation.',
+    )
+
+    reopen_p = sub.add_parser('reopen', help='Reopen a closed task.')
+    reopen_p.add_argument('id', type=int)
+
+    comment_p = sub.add_parser('comment', help='Add a comment to a task.')
+    comment_p.add_argument('id', type=int)
+    body_g2 = comment_p.add_mutually_exclusive_group()
+    body_g2.add_argument('--body', '-b', default=None)
+    body_g2.add_argument(
+        '--body-file', '-F', default=None,
+        help='Path to body file. `-` reads from stdin.',
+    )
+
     return p
 
 
@@ -1134,6 +1327,12 @@ def cli_dispatch(argv=None):
         return cli_cmd_list(args)
     if args.cmd == 'status':
         return cli_cmd_status(args)
+    if args.cmd == 'close':
+        return cli_cmd_close(args)
+    if args.cmd == 'reopen':
+        return cli_cmd_reopen(args)
+    if args.cmd == 'comment':
+        return cli_cmd_comment(args)
     parser.error(f'unknown command: {args.cmd}')
 
 
@@ -1221,6 +1420,36 @@ def cli_cmd_status(_args):
     issues_dir = workspace_resolve(auto_create=False)
     all_tasks = [task for task, _path in repo_list(issues_dir)]
     sys.stdout.write(output_status_text(all_tasks))
+    return 0
+
+
+def cli_cmd_close(args):
+    issues_dir = workspace_resolve(auto_create=False)
+    author = _get_git_author() if args.comment else None
+    task, path = repo_close(
+        issues_dir,
+        args.id,
+        reason=args.reason,
+        comment_body=args.comment,
+        comment_author=author,
+    )
+    sys.stdout.write(f"Closed task #{task['number']} ({args.reason}) at {path}\n")
+    return 0
+
+
+def cli_cmd_reopen(args):
+    issues_dir = workspace_resolve(auto_create=False)
+    task, path = repo_reopen(issues_dir, args.id)
+    sys.stdout.write(f"Reopened task #{task['number']} at {path}\n")
+    return 0
+
+
+def cli_cmd_comment(args):
+    issues_dir = workspace_resolve(auto_create=False)
+    body = _resolve_body(args)
+    author = _get_git_author()
+    task, path = repo_append_comment(issues_dir, args.id, body=body, author=author)
+    sys.stdout.write(f"Added comment to task #{task['number']}\n")
     return 0
 
 

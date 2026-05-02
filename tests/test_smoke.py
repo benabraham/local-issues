@@ -369,5 +369,199 @@ class ListSmokeTests(unittest.TestCase):
             self.assertIn('issues/', result.stderr)
 
 
+class CloseReopenSmokeTests(unittest.TestCase):
+    """End-to-end smoke tests for `issues close` and `issues reopen`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cwd = Path(self.tmp.name)
+        run_cli(['init'], cwd=self.cwd)
+        run_cli(
+            ['create', '--title', 'Close me', '--body', 'A task.'],
+            cwd=self.cwd,
+        )
+
+    def _run(self, *args):
+        return run_cli(list(args), cwd=self.cwd)
+
+    def test_close_moves_file_to_closed(self):
+        result = self._run('close', '1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # File should now be in closed/.
+        self.assertTrue(
+            (self.cwd / 'issues' / 'closed' / '001-close-me.md').exists()
+        )
+        self.assertFalse(
+            (self.cwd / 'issues' / 'open' / '001-close-me.md').exists()
+        )
+
+    def test_close_updates_state_in_file(self):
+        self._run('close', '1')
+        content = (
+            self.cwd / 'issues' / 'closed' / '001-close-me.md'
+        ).read_text(encoding='utf-8')
+        self.assertIn('state: closed', content)
+        self.assertIn('stateReason: completed', content)
+
+    def test_close_default_reason_completed(self):
+        self._run('close', '1')
+        content = (
+            self.cwd / 'issues' / 'closed' / '001-close-me.md'
+        ).read_text(encoding='utf-8')
+        self.assertIn('stateReason: completed', content)
+
+    def test_close_reason_not_planned(self):
+        result = self._run('close', '1', '--reason', 'not_planned')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        content = (
+            self.cwd / 'issues' / 'closed' / '001-close-me.md'
+        ).read_text(encoding='utf-8')
+        self.assertIn('stateReason: not_planned', content)
+
+    def test_close_with_comment(self):
+        result = self._run('close', '1', '--comment', 'all done')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        content = (
+            self.cwd / 'issues' / 'closed' / '001-close-me.md'
+        ).read_text(encoding='utf-8')
+        self.assertIn('## Comments', content)
+        self.assertIn('all done', content)
+
+    def test_close_missing_task_errors(self):
+        result = self._run('close', '999')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('not found', result.stderr.lower())
+
+    def test_reopen_moves_file_to_open(self):
+        self._run('close', '1')
+        result = self._run('reopen', '1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(
+            (self.cwd / 'issues' / 'open' / '001-close-me.md').exists()
+        )
+        self.assertFalse(
+            (self.cwd / 'issues' / 'closed' / '001-close-me.md').exists()
+        )
+
+    def test_reopen_updates_state_in_file(self):
+        self._run('close', '1')
+        self._run('reopen', '1')
+        content = (
+            self.cwd / 'issues' / 'open' / '001-close-me.md'
+        ).read_text(encoding='utf-8')
+        self.assertIn('state: open', content)
+        self.assertIn('stateReason: reopened', content)
+        self.assertIn('closedAt: null', content)
+
+    def test_reopen_missing_task_errors(self):
+        result = self._run('reopen', '999')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('not found', result.stderr.lower())
+
+    def test_view_shows_closed_state(self):
+        self._run('close', '1', '--reason', 'completed')
+        result = self._run('view', '1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('closed', result.stdout)
+
+    def test_view_json_shows_closed_state(self):
+        self._run('close', '1')
+        result = self._run('view', '1', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        d = json.loads(result.stdout)
+        self.assertEqual(d['state'], 'CLOSED')
+        self.assertIsNotNone(d['closedAt'])
+        self.assertEqual(d['stateReason'], 'completed')
+
+
+class CommentSmokeTests(unittest.TestCase):
+    """End-to-end smoke tests for `issues comment`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cwd = Path(self.tmp.name)
+        run_cli(['init'], cwd=self.cwd)
+        run_cli(
+            ['create', '--title', 'Comment target', '--body', 'Task body.'],
+            cwd=self.cwd,
+        )
+
+    def _run(self, *args, stdin=None):
+        return run_cli(list(args), cwd=self.cwd, stdin=stdin)
+
+    def test_comment_body_flag(self):
+        result = self._run('comment', '1', '--body', 'First comment')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        content = (
+            self.cwd / 'issues' / 'open' / '001-comment-target.md'
+        ).read_text(encoding='utf-8')
+        self.assertIn('## Comments', content)
+        self.assertIn('First comment', content)
+
+    def test_comment_body_file_stdin(self):
+        result = self._run('comment', '1', '--body-file', '-',
+                           stdin='From stdin.\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        content = (
+            self.cwd / 'issues' / 'open' / '001-comment-target.md'
+        ).read_text(encoding='utf-8')
+        self.assertIn('From stdin.', content)
+
+    def test_comment_body_file_path(self):
+        body_path = self.cwd / 'comment.txt'
+        body_path.write_text('From a file.\n', encoding='utf-8')
+        result = self._run('comment', '1', '--body-file', str(body_path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        content = (
+            self.cwd / 'issues' / 'open' / '001-comment-target.md'
+        ).read_text(encoding='utf-8')
+        self.assertIn('From a file.', content)
+
+    def test_multiple_comments_append(self):
+        self._run('comment', '1', '--body', 'Comment one')
+        self._run('comment', '1', '--body', 'Comment two')
+        content = (
+            self.cwd / 'issues' / 'open' / '001-comment-target.md'
+        ).read_text(encoding='utf-8')
+        self.assertIn('Comment one', content)
+        self.assertIn('Comment two', content)
+
+    def test_view_json_includes_parsed_comments(self):
+        self._run('comment', '1', '--body', 'JSON comment')
+        result = self._run('view', '1', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        d = json.loads(result.stdout)
+        self.assertEqual(len(d['comments']), 1)
+        self.assertEqual(d['comments'][0]['body'], 'JSON comment')
+
+    def test_view_json_comment_has_required_fields(self):
+        self._run('comment', '1', '--body', 'Check fields')
+        result = self._run('view', '1', '--json')
+        d = json.loads(result.stdout)
+        c = d['comments'][0]
+        self.assertIn('timestamp', c)
+        self.assertIn('author', c)
+        self.assertIn('body', c)
+
+    def test_view_json_two_comments_count(self):
+        self._run('comment', '1', '--body', 'One')
+        self._run('comment', '1', '--body', 'Two')
+        result = self._run('view', '1', '--json')
+        d = json.loads(result.stdout)
+        self.assertEqual(len(d['comments']), 2)
+
+    def test_comment_missing_task_errors(self):
+        result = self._run('comment', '999', '--body', 'Ghost comment')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('not found', result.stderr.lower())
+
+    def test_comment_no_body_non_tty_errors(self):
+        result = self._run('comment', '1', stdin='')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('body', result.stderr.lower())
+
+
 if __name__ == '__main__':
     unittest.main()

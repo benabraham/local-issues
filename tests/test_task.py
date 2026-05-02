@@ -7,6 +7,8 @@ from issues import (
     DEFAULT_SLUG,
     task_new,
     task_parse,
+    task_parse_comments,
+    task_comments_to_raw,
     task_serialise,
     task_slug,
     task_to_camel,
@@ -216,6 +218,158 @@ class JsonViewTests(unittest.TestCase):
 
     def test_comments_default_empty_list(self):
         task = task_new(number=1, title='t', body='b')
+        d = task_to_json_dict(task)
+        self.assertEqual(d['comments'], [])
+
+
+class CommentsParseTests(unittest.TestCase):
+    """task_parse_comments and task_comments_to_raw."""
+
+    def test_empty_string_returns_empty_list(self):
+        self.assertEqual(task_parse_comments(''), [])
+
+    def test_none_like_falsy_returns_empty_list(self):
+        self.assertEqual(task_parse_comments(None), [])
+
+    def test_comments_heading_only_returns_empty_list(self):
+        # A `## Comments` section with no entries.
+        raw = '## Comments\n'
+        self.assertEqual(task_parse_comments(raw), [])
+
+    def test_comments_heading_with_blank_lines_returns_empty_list(self):
+        raw = '## Comments\n\n\n'
+        self.assertEqual(task_parse_comments(raw), [])
+
+    def test_single_comment_parsed(self):
+        raw = (
+            '## Comments\n\n'
+            '### 2026-05-02T10:00:00Z — alice\n\n'
+            'First comment body.\n'
+        )
+        comments = task_parse_comments(raw)
+        self.assertEqual(len(comments), 1)
+        self.assertEqual(comments[0]['timestamp'], '2026-05-02T10:00:00Z')
+        self.assertEqual(comments[0]['author'], 'alice')
+        self.assertEqual(comments[0]['body'], 'First comment body.')
+
+    def test_multiple_comments_parsed(self):
+        raw = (
+            '## Comments\n\n'
+            '### 2026-05-02T10:00:00Z — alice\n\n'
+            'First comment.\n\n'
+            '### 2026-05-02T11:00:00Z — bob\n\n'
+            'Second comment.\n'
+        )
+        comments = task_parse_comments(raw)
+        self.assertEqual(len(comments), 2)
+        self.assertEqual(comments[0]['author'], 'alice')
+        self.assertEqual(comments[0]['body'], 'First comment.')
+        self.assertEqual(comments[1]['author'], 'bob')
+        self.assertEqual(comments[1]['body'], 'Second comment.')
+
+    def test_multiline_comment_body_preserved(self):
+        raw = (
+            '## Comments\n\n'
+            '### 2026-05-02T10:00:00Z — alice\n\n'
+            'Line one.\nLine two.\n'
+        )
+        comments = task_parse_comments(raw)
+        self.assertEqual(len(comments), 1)
+        self.assertIn('Line one.', comments[0]['body'])
+        self.assertIn('Line two.', comments[0]['body'])
+
+    def test_malformed_header_skipped(self):
+        # A `### ` line without the em dash separator is not a valid comment
+        # header — the regex won't match it, so no comment is emitted.
+        raw = (
+            '## Comments\n\n'
+            '### this-is-not-a-valid-header\n\n'
+            'Some text.\n\n'
+            '### 2026-05-02T10:00:00Z — alice\n\n'
+            'Good comment.\n'
+        )
+        comments = task_parse_comments(raw)
+        # Only the well-formed entry should be parsed.
+        self.assertEqual(len(comments), 1)
+        self.assertEqual(comments[0]['author'], 'alice')
+
+    def test_round_trip_empty(self):
+        self.assertEqual(task_comments_to_raw([]), '')
+
+    def test_round_trip_single_comment(self):
+        original = [{'timestamp': '2026-05-02T10:00:00Z', 'author': 'alice',
+                     'body': 'Hello world.'}]
+        raw = task_comments_to_raw(original)
+        parsed = task_parse_comments(raw)
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]['timestamp'], original[0]['timestamp'])
+        self.assertEqual(parsed[0]['author'], original[0]['author'])
+        self.assertEqual(parsed[0]['body'], original[0]['body'])
+
+    def test_round_trip_multiple_comments(self):
+        original = [
+            {'timestamp': '2026-05-02T10:00:00Z', 'author': 'alice',
+             'body': 'First.'},
+            {'timestamp': '2026-05-02T11:00:00Z', 'author': 'bob',
+             'body': 'Second.'},
+        ]
+        raw = task_comments_to_raw(original)
+        parsed = task_parse_comments(raw)
+        self.assertEqual(len(parsed), len(original))
+        for i, (p, o) in enumerate(zip(parsed, original)):
+            with self.subTest(i=i):
+                self.assertEqual(p['timestamp'], o['timestamp'])
+                self.assertEqual(p['author'], o['author'])
+                self.assertEqual(p['body'], o['body'])
+
+    def test_to_raw_contains_heading(self):
+        raw = task_comments_to_raw([
+            {'timestamp': '2026-05-02T10:00:00Z', 'author': 'alice',
+             'body': 'hi'},
+        ])
+        self.assertIn('## Comments', raw)
+        self.assertIn('### 2026-05-02T10:00:00Z — alice', raw)
+        self.assertIn('hi', raw)
+
+    def test_full_file_round_trip_with_comments(self):
+        """parse(serialise(task_with_comments)) preserves comments."""
+        task = task_new(number=1, title='With comments', body='Initial.\n')
+        comments = [
+            {'timestamp': '2026-05-02T10:00:00Z', 'author': 'alice',
+             'body': 'Comment one.'},
+            {'timestamp': '2026-05-02T11:00:00Z', 'author': 'bob',
+             'body': 'Comment two.'},
+        ]
+        task['comments_raw'] = task_comments_to_raw(comments)
+        text = task_serialise(task)
+        parsed = task_parse(text)
+        reparsed_comments = task_parse_comments(parsed['comments_raw'])
+        self.assertEqual(len(reparsed_comments), 2)
+        self.assertEqual(reparsed_comments[0]['author'], 'alice')
+        self.assertEqual(reparsed_comments[1]['author'], 'bob')
+
+
+class JsonViewCommentTests(unittest.TestCase):
+    def test_task_to_json_dict_includes_parsed_comments(self):
+        task = task_new(number=1, title='t', body='b')
+        from issues import task_comments_to_raw
+        task['comments_raw'] = task_comments_to_raw([
+            {'timestamp': '2026-05-02T10:00:00Z', 'author': 'alice',
+             'body': 'My comment.'},
+        ])
+        d = task_to_json_dict(task)
+        self.assertEqual(len(d['comments']), 1)
+        self.assertEqual(d['comments'][0]['author'], 'alice')
+        self.assertEqual(d['comments'][0]['body'], 'My comment.')
+
+    def test_task_to_json_dict_empty_comments(self):
+        task = task_new(number=1, title='t', body='b')
+        d = task_to_json_dict(task)
+        self.assertEqual(d['comments'], [])
+
+    def test_task_to_json_dict_no_comments_raw_key(self):
+        task = task_new(number=1, title='t', body='b')
+        task.pop('comments_raw', None)
         d = task_to_json_dict(task)
         self.assertEqual(d['comments'], [])
 
