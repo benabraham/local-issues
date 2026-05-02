@@ -8,6 +8,7 @@ are grouped by section comments):
   Workspace  — discovery of `issues/` directory (CWD walk-up).
   Task       — frontmatter parse/serialise, slug, snake<->camel.
   Repository — atomic on-disk task store (O_EXCL, rename, .next-id).
+  Query      — filter composition, priority-then-ID sort key.
   Cli        — argparse + verb dispatch.
   Output     — text + JSON formatters.
   Editor     — $EDITOR invocation with TTY check.
@@ -732,6 +733,32 @@ def repo_create(issues_dir, title, body='', task_type='task', parent=None,
     )
 
 
+def repo_list(issues_dir):
+    """Return a list of (task, path) for every task across open/ and closed/.
+
+    Files that do not match the NNN-slug.md pattern are silently skipped
+    (guards against temp files, .next-id, README, etc.).  Parse errors are
+    also skipped (best-effort: a corrupted single file should not break list).
+    Tasks are returned in arbitrary order — callers are expected to sort.
+    """
+    results = []
+    for sub in (OPEN_DIRNAME, CLOSED_DIRNAME):
+        d = issues_dir / sub
+        if not d.is_dir():
+            continue
+        for entry in sorted(os.listdir(d)):
+            if not _FILENAME_RE.match(entry):
+                continue
+            path = d / entry
+            try:
+                text = path.read_text(encoding='utf-8')
+                task = task_parse(text)
+            except (IssuesError, OSError):
+                continue
+            results.append((task, path))
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Atomic FS primitives
 # ---------------------------------------------------------------------------
@@ -785,6 +812,52 @@ def _atomic_write_text(path, text):
         except OSError:
             pass
         raise
+
+
+# ---------------------------------------------------------------------------
+# Query
+# ---------------------------------------------------------------------------
+#
+# Pure functions: no I/O.  Takes lists of task dicts (snake_case) and returns
+# filtered/sorted subsets.  Designed for easy unit testing without touching
+# the filesystem.
+
+
+def query_filter(tasks, state='open', task_type='task', labels=None):
+    """Return the subset of `tasks` matching all supplied criteria.
+
+    Parameters
+    ----------
+    tasks     : iterable of task dicts (snake_case keys)
+    state     : 'open' | 'closed' | 'all'  (default 'open')
+    task_type : 'task' | 'prd' | 'all'     (default 'task')
+    labels    : list of label strings — AND semantics: task must carry ALL
+                listed labels.  None / [] means no label filter.
+    """
+    out = []
+    label_set = set(labels) if labels else set()
+    for task in tasks:
+        if state != 'all' and task.get('state') != state:
+            continue
+        if task_type != 'all' and task.get('type') != task_type:
+            continue
+        if label_set:
+            task_labels = set(task.get('labels') or [])
+            if not label_set.issubset(task_labels):
+                continue
+        out.append(task)
+    return out
+
+
+def query_sort_key(task):
+    """Return a (priority_sort, number) tuple for stable priority-then-ID sort.
+
+    Lower priority number = higher priority.  Tasks with priority=None sort
+    after all tasks that have a numeric priority.
+    """
+    priority = task.get('priority')
+    priority_sort = float('inf') if priority is None else priority
+    return (priority_sort, task.get('number') or 0)
 
 
 # ---------------------------------------------------------------------------
@@ -897,6 +970,80 @@ def output_create_summary(task, path):
     return f"Created task #{task['number']} at {path}\n"
 
 
+def output_list_text(tasks):
+    """Render a list of tasks as a padded text table.
+
+    Columns: NUMBER | TITLE | TYPE | LABELS | PRI
+    An empty list renders just the header row (no separator).
+    """
+    def _label_str(task):
+        labels = task.get('labels') or []
+        return ', '.join(labels) if labels else '-'
+
+    def _pri_str(task):
+        p = task.get('priority')
+        return str(p) if p is not None else '-'
+
+    rows = []
+    for task in tasks:
+        rows.append({
+            'num': str(task.get('number') or ''),
+            'title': task.get('title') or '',
+            'type': task.get('type') or '',
+            'labels': _label_str(task),
+            'pri': _pri_str(task),
+        })
+
+    # Column widths: max of header and content.
+    headers = {'num': '#', 'title': 'TITLE', 'type': 'TYPE',
+               'labels': 'LABELS', 'pri': 'PRI'}
+    widths = {col: len(headers[col]) for col in headers}
+    for row in rows:
+        for col in widths:
+            widths[col] = max(widths[col], len(row[col]))
+
+    def _fmt(row):
+        return (
+            f"{row['num']:<{widths['num']}}  "
+            f"{row['title']:<{widths['title']}}  "
+            f"{row['type']:<{widths['type']}}  "
+            f"{row['labels']:<{widths['labels']}}  "
+            f"{row['pri']}"
+        )
+
+    header_row = _fmt(headers)
+    lines = [header_row]
+    for row in rows:
+        lines.append(_fmt(row))
+    return '\n'.join(lines) + '\n'
+
+
+def output_list_json(tasks):
+    """Render a list of tasks as a gh-shaped JSON array (camelCase)."""
+    return json.dumps(
+        [task_to_json_dict(t) for t in tasks],
+        indent=2,
+        ensure_ascii=False,
+    ) + '\n'
+
+
+def output_status_text(tasks):
+    """Render a count summary: open vs closed (and by type if useful)."""
+    open_tasks = [t for t in tasks if t.get('state') == 'open'
+                  and t.get('type') != 'prd']
+    open_prds = [t for t in tasks if t.get('state') == 'open'
+                 and t.get('type') == 'prd']
+    closed_all = [t for t in tasks if t.get('state') == 'closed']
+
+    lines = [
+        f'Open tasks: {len(open_tasks)}',
+        f'Open PRDs:  {len(open_prds)}',
+        f'Closed:     {len(closed_all)}',
+        f'Total:      {len(tasks)}',
+    ]
+    return '\n'.join(lines) + '\n'
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -949,6 +1096,28 @@ def cli_build_parser():
     view_p.add_argument('--json', action='store_true', dest='as_json')
     view_p.add_argument('--web', action='store_true', help='(no-op, gh compat)')
 
+    list_p = sub.add_parser('list', help='List tasks.')
+    list_p.add_argument(
+        '--label', '-l', action='append', default=[],
+        help='Filter by label (repeatable; AND semantics).',
+    )
+    list_p.add_argument(
+        '--state', choices=('open', 'closed', 'all'), default='open',
+        help='Filter by state (default: open).',
+    )
+    list_p.add_argument(
+        '--type', dest='task_type', choices=('task', 'prd', 'all'),
+        default='task',
+        help='Filter by type (default: task — excludes PRDs).',
+    )
+    list_p.add_argument(
+        '--json', action='store_true', dest='as_json',
+        help='Output as JSON array.',
+    )
+    list_p.add_argument('--web', action='store_true', help='(no-op, gh compat)')
+
+    _sub = sub.add_parser('status', help='Show open/closed task counts.')
+
     return p
 
 
@@ -961,6 +1130,10 @@ def cli_dispatch(argv=None):
         return cli_cmd_create(args)
     if args.cmd == 'view':
         return cli_cmd_view(args)
+    if args.cmd == 'list':
+        return cli_cmd_list(args)
+    if args.cmd == 'status':
+        return cli_cmd_status(args)
     parser.error(f'unknown command: {args.cmd}')
 
 
@@ -1024,6 +1197,30 @@ def cli_cmd_view(args):
         sys.stdout.write(output_view_json(task))
     else:
         sys.stdout.write(output_view_text(task))
+    return 0
+
+
+def cli_cmd_list(args):
+    issues_dir = workspace_resolve(auto_create=False)
+    all_tasks = [task for task, _path in repo_list(issues_dir)]
+    filtered = query_filter(
+        all_tasks,
+        state=args.state,
+        task_type=args.task_type,
+        labels=args.label or [],
+    )
+    sorted_tasks = sorted(filtered, key=query_sort_key)
+    if args.as_json:
+        sys.stdout.write(output_list_json(sorted_tasks))
+    else:
+        sys.stdout.write(output_list_text(sorted_tasks))
+    return 0
+
+
+def cli_cmd_status(args):
+    issues_dir = workspace_resolve(auto_create=False)
+    all_tasks = [task for task, _path in repo_list(issues_dir)]
+    sys.stdout.write(output_status_text(all_tasks))
     return 0
 
 

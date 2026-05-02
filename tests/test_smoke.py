@@ -196,5 +196,178 @@ class SmokeTests(unittest.TestCase):
         self.assertIn('issues/', result.stderr)
 
 
+class ListSmokeTests(unittest.TestCase):
+    """End-to-end smoke tests for `issues list` and `issues status`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cwd = Path(self.tmp.name)
+        # Bootstrap and create a fixture set.
+        run_cli(['init'], cwd=self.cwd)
+        run_cli(
+            ['create', '--title', 'Task one',
+             '--body', 'b', '--priority', '2', '--label', 'bug'],
+            cwd=self.cwd,
+        )
+        run_cli(
+            ['create', '--title', 'Task two',
+             '--body', 'b', '--priority', '0', '--label', 'bug',
+             '--label', 'feature'],
+            cwd=self.cwd,
+        )
+        run_cli(
+            ['create', '--title', 'The PRD',
+             '--body', 'b', '--type', 'prd'],
+            cwd=self.cwd,
+        )
+        run_cli(
+            ['create', '--title', 'Task three',
+             '--body', 'b', '--label', 'feature'],
+            cwd=self.cwd,
+        )
+
+    def _run(self, *args):
+        return run_cli(list(args), cwd=self.cwd)
+
+    # --- list (text) ---
+
+    def test_list_default_shows_open_tasks_only(self):
+        result = self._run('list')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Default excludes PRDs.
+        self.assertNotIn('The PRD', result.stdout)
+        # Has both open tasks.
+        self.assertIn('Task one', result.stdout)
+        self.assertIn('Task two', result.stdout)
+        self.assertIn('Task three', result.stdout)
+
+    def test_list_default_sort_priority_then_id(self):
+        result = self._run('list')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = [l for l in result.stdout.splitlines() if l.strip()]
+        # First data row (after header) should be Task two (priority=0).
+        data_rows = lines[1:]  # skip header
+        self.assertIn('Task two', data_rows[0])
+
+    def test_list_type_prd_shows_only_prds(self):
+        result = self._run('list', '--type', 'prd')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('The PRD', result.stdout)
+        self.assertNotIn('Task one', result.stdout)
+        self.assertNotIn('Task two', result.stdout)
+
+    def test_list_type_all_shows_everything(self):
+        result = self._run('list', '--type', 'all')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('The PRD', result.stdout)
+        self.assertIn('Task one', result.stdout)
+
+    def test_list_label_single_filter(self):
+        result = self._run('list', '--label', 'bug')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Task one', result.stdout)
+        self.assertIn('Task two', result.stdout)
+        # Task three has only 'feature', not 'bug'.
+        self.assertNotIn('Task three', result.stdout)
+
+    def test_list_label_and_semantics(self):
+        # Only Task two has both 'bug' AND 'feature'.
+        result = self._run('list', '--label', 'bug', '--label', 'feature')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Task two', result.stdout)
+        self.assertNotIn('Task one', result.stdout)
+        self.assertNotIn('Task three', result.stdout)
+
+    def test_list_state_closed_empty_no_error(self):
+        result = self._run('list', '--state', 'closed')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # No tasks closed, but should still output the header.
+        self.assertIn('TITLE', result.stdout)
+        self.assertNotIn('Task one', result.stdout)
+
+    def test_list_without_workspace_errors(self):
+        import tempfile as _tmpfile
+        with _tmpfile.TemporaryDirectory() as empty:
+            result = run_cli(['list'], cwd=Path(empty))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('issues/', result.stderr)
+
+    # --- list (json) ---
+
+    def test_list_json_is_array(self):
+        result = self._run('list', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertIsInstance(data, list)
+
+    def test_list_json_default_excludes_prd(self):
+        result = self._run('list', '--json')
+        data = json.loads(result.stdout)
+        types = {item['type'] for item in data}
+        self.assertNotIn('prd', types)
+
+    def test_list_json_fields_camel_case(self):
+        result = self._run('list', '--json')
+        data = json.loads(result.stdout)
+        self.assertTrue(len(data) > 0, 'expected at least one task')
+        item = data[0]
+        for key in ('number', 'title', 'state', 'stateReason', 'createdAt',
+                    'closedAt', 'labels', 'assignees', 'body',
+                    'priority', 'parent', 'type', 'blockedBy', 'comments'):
+            self.assertIn(key, item, f'missing key {key!r}')
+        for key in item:
+            self.assertNotIn('_', key, f'underscore in key {key!r}')
+
+    def test_list_json_state_uppercase(self):
+        result = self._run('list', '--json')
+        data = json.loads(result.stdout)
+        for item in data:
+            self.assertIn(item['state'], ('OPEN', 'CLOSED'))
+
+    def test_list_json_type_all(self):
+        result = self._run('list', '--type', 'all', '--json')
+        data = json.loads(result.stdout)
+        types = {item['type'] for item in data}
+        self.assertIn('prd', types)
+        self.assertIn('task', types)
+
+    def test_list_json_sort_order_priority_then_id(self):
+        """First element should be the highest-priority task (Task two, p=0)."""
+        result = self._run('list', '--json')
+        data = json.loads(result.stdout)
+        # Filter by priority not None, first should be priority=0 task.
+        with_priority = [item for item in data if item['priority'] is not None]
+        if with_priority:
+            self.assertEqual(with_priority[0]['priority'], 0)
+
+    # --- status ---
+
+    def test_status_shows_counts(self):
+        result = self._run('status')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        # Should mention open tasks count.
+        self.assertIn('Open tasks:', out)
+        self.assertIn('Closed:', out)
+        self.assertIn('Total:', out)
+
+    def test_status_counts_are_correct(self):
+        result = self._run('status')
+        out = result.stdout
+        # We created 3 tasks + 1 prd, all open.
+        self.assertIn('Open tasks: 3', out)
+        self.assertIn('Open PRDs:  1', out)
+        self.assertIn('Closed:     0', out)
+        self.assertIn('Total:      4', out)
+
+    def test_status_without_workspace_errors(self):
+        import tempfile as _tmpfile
+        with _tmpfile.TemporaryDirectory() as empty:
+            result = run_cli(['status'], cwd=Path(empty))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('issues/', result.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()
