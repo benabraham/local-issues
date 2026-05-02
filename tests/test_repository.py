@@ -11,6 +11,7 @@ from issues import (
     IssuesError,
     NEXT_ID_FILENAME,
     repo_append_comment,
+    repo_cascade_delete,
     repo_close,
     repo_create,
     repo_delete,
@@ -601,6 +602,87 @@ class RepoDeleteTests(IsolatedRepoTestCase):
         self.assertIsNotNone(path)
         repo_delete(self.issues_dir, task['number'])
         self.assertFalse(path.exists())
+
+
+class RepoCascadeDeleteTests(IsolatedRepoTestCase):
+    """repo_cascade_delete: removes parent + children, leaves .next-id intact."""
+
+    def test_cascade_delete_removes_parent(self):
+        prd, _ = repo_create(self.issues_dir, title='PRD', body='b',
+                              task_type='prd')
+        path = repo_find_path(self.issues_dir, prd['number'])
+        self.assertIsNotNone(path)
+        repo_cascade_delete(self.issues_dir, prd['number'])
+        self.assertFalse(path.exists())
+
+    def test_cascade_delete_removes_children(self):
+        prd, _ = repo_create(self.issues_dir, title='PRD', body='b',
+                              task_type='prd')
+        child1, _ = repo_create(self.issues_dir, title='Child 1', body='b',
+                                 parent=prd['number'])
+        child2, _ = repo_create(self.issues_dir, title='Child 2', body='b',
+                                 parent=prd['number'])
+        repo_cascade_delete(self.issues_dir, prd['number'])
+        self.assertIsNone(repo_find_path(self.issues_dir, prd['number']))
+        self.assertIsNone(repo_find_path(self.issues_dir, child1['number']))
+        self.assertIsNone(repo_find_path(self.issues_dir, child2['number']))
+
+    def test_cascade_delete_returns_all_deleted_numbers(self):
+        prd, _ = repo_create(self.issues_dir, title='PRD', body='b',
+                              task_type='prd')
+        child1, _ = repo_create(self.issues_dir, title='Child 1', body='b',
+                                 parent=prd['number'])
+        child2, _ = repo_create(self.issues_dir, title='Child 2', body='b',
+                                 parent=prd['number'])
+        deleted = repo_cascade_delete(self.issues_dir, prd['number'])
+        self.assertIn(prd['number'], deleted)
+        self.assertIn(child1['number'], deleted)
+        self.assertIn(child2['number'], deleted)
+        self.assertEqual(len(deleted), 3)
+
+    def test_cascade_delete_no_children_deletes_only_parent(self):
+        prd, _ = repo_create(self.issues_dir, title='PRD', body='b',
+                              task_type='prd')
+        deleted = repo_cascade_delete(self.issues_dir, prd['number'])
+        self.assertEqual(deleted, [prd['number']])
+
+    def test_cascade_delete_does_not_delete_non_children(self):
+        """Tasks with a different parent field are not affected."""
+        prd1, _ = repo_create(self.issues_dir, title='PRD 1', body='b',
+                               task_type='prd')
+        prd2, _ = repo_create(self.issues_dir, title='PRD 2', body='b',
+                               task_type='prd')
+        child_of_2, _ = repo_create(self.issues_dir, title='Child of 2', body='b',
+                                     parent=prd2['number'])
+        repo_cascade_delete(self.issues_dir, prd1['number'])
+        # Child of prd2 must survive.
+        self.assertIsNotNone(repo_find_path(self.issues_dir, child_of_2['number']))
+        self.assertIsNotNone(repo_find_path(self.issues_dir, prd2['number']))
+
+    def test_cascade_delete_missing_parent_raises(self):
+        with self.assertRaises(IssuesError):
+            repo_cascade_delete(self.issues_dir, 999)
+
+    def test_cascade_delete_does_not_touch_next_id(self):
+        """IDs are never reused — .next-id must not be decremented."""
+        prd, _ = repo_create(self.issues_dir, title='PRD', body='b',
+                              task_type='prd')
+        child, _ = repo_create(self.issues_dir, title='Child', body='b',
+                                parent=prd['number'])
+        next_id_before = repo_read_next_id(self.issues_dir)
+        repo_cascade_delete(self.issues_dir, prd['number'])
+        next_id_after = repo_read_next_id(self.issues_dir)
+        self.assertEqual(next_id_before, next_id_after)
+
+    def test_cascade_delete_works_on_closed_parent(self):
+        prd, _ = repo_create(self.issues_dir, title='PRD', body='b',
+                              task_type='prd')
+        child, _ = repo_create(self.issues_dir, title='Child', body='b',
+                                parent=prd['number'])
+        repo_close(self.issues_dir, prd['number'])
+        deleted = repo_cascade_delete(self.issues_dir, prd['number'])
+        self.assertIn(prd['number'], deleted)
+        self.assertIn(child['number'], deleted)
 
 
 if __name__ == '__main__':

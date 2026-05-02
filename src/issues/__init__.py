@@ -1071,6 +1071,50 @@ def repo_delete(issues_dir, number):
         raise IssuesError(f'cannot delete task #{number}: {exc}') from exc
 
 
+def repo_cascade_delete(issues_dir, number):
+    """Delete a task and every task whose `parent` field equals `number`.
+
+    The parent task is deleted first; children are then unlinked in arbitrary
+    order (each unlink is independent and atomic).  `.next-id` is NOT touched
+    — deleted IDs are never reused.
+
+    Raises IssuesError if the parent task does not exist.
+    Returns a list of task numbers that were deleted (parent first, then
+    children in discovery order).
+    """
+    # Verify the parent task exists before touching anything.
+    parent_path = repo_find_path(issues_dir, number)
+    if parent_path is None:
+        raise IssuesError(f'task #{number} not found')
+
+    # Collect children: tasks whose `parent` field == number.
+    child_numbers = []
+    for task, _path in repo_list(issues_dir):
+        if task.get('parent') == number and task.get('number') != number:
+            child_numbers.append(task['number'])
+
+    # Delete parent first.
+    try:
+        os.unlink(parent_path)
+    except OSError as exc:
+        raise IssuesError(f'cannot delete task #{number}: {exc}') from exc
+
+    deleted = [number]
+
+    # Delete each child; skip gracefully if already gone (race-safe).
+    for child_num in child_numbers:
+        child_path = repo_find_path(issues_dir, child_num)
+        if child_path is None:
+            continue
+        try:
+            os.unlink(child_path)
+            deleted.append(child_num)
+        except OSError:
+            pass  # best-effort; a concurrent delete is fine
+
+    return deleted
+
+
 # ---------------------------------------------------------------------------
 # Atomic FS primitives
 # ---------------------------------------------------------------------------
@@ -1133,6 +1177,153 @@ def _atomic_write_text(path, text):
 # Pure functions: no I/O.  Takes lists of task dicts (snake_case) and returns
 # filtered/sorted subsets.  Designed for easy unit testing without touching
 # the filesystem.
+
+
+def query_is_ready(task, all_tasks_by_number):
+    """Return True if `task` is open, not a PRD, and not blocked by any open task.
+
+    A blocker that does not exist in `all_tasks_by_number` is treated as
+    satisfied (closed-or-missing semantics — dangling references do not block).
+    Pure: no I/O.
+    """
+    if task.get('state') != 'open':
+        return False
+    if task.get('type') == 'prd':
+        return False
+    for blocker_id in (task.get('blocked_by') or []):
+        blocker = all_tasks_by_number.get(blocker_id)
+        if blocker is not None and blocker.get('state') == 'open':
+            return False
+    return True
+
+
+def query_detect_cycle(tasks):
+    """DFS cycle detection on the blockedBy graph.
+
+    Nodes are task numbers; edges follow `blocked_by` lists (task A -> B means
+    A is blocked by B).  Only tasks present in `tasks` are traversed; dangling
+    references (blockers that don't exist in the list) are silently skipped.
+
+    Returns a list of task IDs representing the cycle path (e.g. [3, 5, 7, 3])
+    with the start ID repeated at the end, or ``None`` if no cycle exists.
+    """
+    by_number = {t['number']: t for t in tasks}
+
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {n: WHITE for n in by_number}
+    # Current DFS path — used to reconstruct the cycle.
+    path = []
+    path_set = set()
+
+    def _dfs(node):
+        color[node] = GRAY
+        path.append(node)
+        path_set.add(node)
+        for blocker_id in (by_number[node].get('blocked_by') or []):
+            if blocker_id not in by_number:
+                continue  # dangling reference — skip
+            if blocker_id in path_set:
+                # Closing edge found: blocker_id is already in current path.
+                cycle_start = path.index(blocker_id)
+                return path[cycle_start:] + [blocker_id]
+            if color[blocker_id] == WHITE:
+                result = _dfs(blocker_id)
+                if result is not None:
+                    return result
+        color[node] = BLACK
+        path.pop()
+        path_set.remove(node)
+        return None
+
+    for node in list(by_number.keys()):
+        if color[node] == WHITE:
+            result = _dfs(node)
+            if result is not None:
+                return result
+    return None
+
+
+def query_would_introduce_cycle(tasks, source_id, new_blocker_id):
+    """Return True if adding `source_id -> new_blocker_id` would create a cycle.
+
+    The check is: can `new_blocker_id` already reach `source_id` via the
+    existing `blocked_by` graph?  If so, adding the new edge would close a
+    cycle.  Self-loops (source_id == new_blocker_id) also return True.
+
+    Pure: no I/O.
+    """
+    if source_id == new_blocker_id:
+        return True
+    by_number = {t['number']: t for t in tasks}
+    # BFS/DFS from new_blocker_id; if we reach source_id, a cycle would form.
+    visited = set()
+    stack = [new_blocker_id]
+    while stack:
+        node = stack.pop()
+        if node == source_id:
+            return True
+        if node in visited:
+            continue
+        visited.add(node)
+        if node in by_number:
+            for blocker_id in (by_number[node].get('blocked_by') or []):
+                if blocker_id not in visited:
+                    stack.append(blocker_id)
+    return False
+
+
+def query_next(tasks, labels=()):
+    """Return the next ready task or None.
+
+    "Ready" = open + not PRD + all blockers closed-or-missing.  Applies the
+    `labels` AND-filter on top.  Cycles in the graph raise IssuesError before
+    any readiness check is performed.  Sorted priority-then-ID (same key as
+    `query_sort_key`).
+    """
+    cycle = query_detect_cycle(tasks)
+    if cycle is not None:
+        path_str = ' -> '.join(str(n) for n in cycle)
+        raise IssuesError(f'cycle detected in blockedBy: {path_str}')
+
+    by_number = {t['number']: t for t in tasks}
+    label_set = set(labels)
+    candidates = []
+    for task in tasks:
+        if not query_is_ready(task, by_number):
+            continue
+        if label_set:
+            task_labels = set(task.get('labels') or [])
+            if not label_set.issubset(task_labels):
+                continue
+        candidates.append(task)
+    if not candidates:
+        return None
+    return min(candidates, key=query_sort_key)
+
+
+def query_ready_set(tasks, labels=()):
+    """Return the full ready set sorted by priority-then-ID.
+
+    Same semantics as `query_next` but returns all ready tasks (not just the
+    first).  Cycles raise IssuesError before any readiness check.
+    """
+    cycle = query_detect_cycle(tasks)
+    if cycle is not None:
+        path_str = ' -> '.join(str(n) for n in cycle)
+        raise IssuesError(f'cycle detected in blockedBy: {path_str}')
+
+    by_number = {t['number']: t for t in tasks}
+    label_set = set(labels)
+    candidates = []
+    for task in tasks:
+        if not query_is_ready(task, by_number):
+            continue
+        if label_set:
+            task_labels = set(task.get('labels') or [])
+            if not label_set.issubset(task_labels):
+                continue
+        candidates.append(task)
+    return sorted(candidates, key=query_sort_key)
 
 
 def query_filter(tasks, state='open', task_type='task', labels=None):
@@ -1440,6 +1631,10 @@ def cli_build_parser():
         help='Filter by type (default: task — excludes PRDs).',
     )
     list_p.add_argument(
+        '--ready', action='store_true', dest='ready',
+        help='Show only ready tasks (open, not PRD, all blockers closed).',
+    )
+    list_p.add_argument(
         '--json', action='store_true', dest='as_json',
         help='Output as JSON array.',
     )
@@ -1508,6 +1703,20 @@ def cli_build_parser():
         '--yes', '-y', action='store_true',
         help='Skip confirmation prompt.',
     )
+    delete_p.add_argument(
+        '--cascade', action='store_true',
+        help='Also delete all tasks whose parent field matches this ID.',
+    )
+
+    next_p = sub.add_parser(
+        'next',
+        help='Print the ID of the next ready task (exit 1 if none).',
+        parents=[gh],
+    )
+    next_p.add_argument(
+        '--label', '-l', action='append', default=[],
+        help='Constrain candidate set by label (repeatable; AND semantics).',
+    )
 
     return p
 
@@ -1535,6 +1744,8 @@ def cli_dispatch(argv=None):
         return cli_cmd_edit(args)
     if args.cmd == 'delete':
         return cli_cmd_delete(args)
+    if args.cmd == 'next':
+        return cli_cmd_next(args)
     parser.error(f'unknown command: {args.cmd}')
 
 
@@ -1604,13 +1815,17 @@ def cli_cmd_view(args):
 def cli_cmd_list(args):
     issues_dir = workspace_resolve(auto_create=False)
     all_tasks = [task for task, _path in repo_list(issues_dir)]
-    filtered = query_filter(
-        all_tasks,
-        state=args.state,
-        task_type=args.task_type,
-        labels=args.label or [],
-    )
-    sorted_tasks = sorted(filtered, key=query_sort_key)
+    if getattr(args, 'ready', False):
+        # --ready forces open state and non-PRD type; composes with --label.
+        sorted_tasks = query_ready_set(all_tasks, labels=args.label or [])
+    else:
+        filtered = query_filter(
+            all_tasks,
+            state=args.state,
+            task_type=args.task_type,
+            labels=args.label or [],
+        )
+        sorted_tasks = sorted(filtered, key=query_sort_key)
     if args.as_json:
         sys.stdout.write(output_list_json(sorted_tasks))
     else:
@@ -1683,6 +1898,16 @@ def cli_cmd_edit(args):
 
     priority = _parse_priority_arg(args.priority)
 
+    # Cycle check: reject any --add-blocked-by edge that would close a cycle.
+    if args.add_blocked_by:
+        all_tasks = [t for t, _p in repo_list(issues_dir)]
+        for new_blocker in args.add_blocked_by:
+            if query_would_introduce_cycle(all_tasks, args.id, new_blocker):
+                raise IssuesError(
+                    f'adding --add-blocked-by {new_blocker} to task #{args.id} '
+                    f'would introduce a cycle in the blockedBy graph'
+                )
+
     task, path = repo_edit(
         issues_dir, args.id,
         title=args.title,
@@ -1727,11 +1952,43 @@ def cli_cmd_delete(args):
     issues_dir = workspace_resolve(auto_create=False)
     # Read the task first so we can show the title in the prompt.
     task, _ = repo_read(issues_dir, args.id)
+
+    if getattr(args, 'cascade', False):
+        # --cascade always requires --yes; never prompt (blast radius too large).
+        if not args.yes:
+            raise IssuesError(
+                'delete --cascade requires --yes; pass --yes to confirm '
+                'deletion of the task and all its children.'
+            )
+        deleted = repo_cascade_delete(issues_dir, args.id)
+        sys.stdout.write(
+            f"Deleted {len(deleted)} task(s): "
+            + ', '.join(f'#{n}' for n in deleted) + '\n'
+        )
+        return 0
+
     if not _confirm_delete(task, yes=args.yes):
         sys.stderr.write('Aborted.\n')
         return 1
     repo_delete(issues_dir, args.id)
     sys.stdout.write(f"Deleted task #{task['number']}\n")
+    return 0
+
+
+def cli_cmd_next(args):
+    """Print the ID of the next ready task; exit 1 with empty stdout if none.
+
+    "Ready" = open + not PRD + all blockers closed-or-missing.  Sorted by
+    priority-then-ID.  `--label` constrains the candidate set (AND semantics).
+    Exit code 0 on success, 1 when no ready task exists — designed for the
+    shell idiom ``while id=$(issues next); do ...; done``.
+    """
+    issues_dir = workspace_resolve(auto_create=False)
+    all_tasks = [task for task, _path in repo_list(issues_dir)]
+    task = query_next(all_tasks, labels=args.label or [])
+    if task is None:
+        return 1
+    sys.stdout.write(f"{task['number']}\n")
     return 0
 
 

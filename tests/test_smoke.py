@@ -731,6 +731,187 @@ class DeleteSmokeTests(unittest.TestCase):
         self.assertTrue(any(n.startswith('002-') for n in names))
 
 
+class NextSmokeTests(unittest.TestCase):
+    """End-to-end smoke tests for `issues next`, `list --ready`, and cycle/cascade."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cwd = Path(self.tmp.name)
+        run_cli(['init'], cwd=self.cwd)
+        # Create: A (task 1, no blockers), B (task 2, blocked by A),
+        # C (task 3, blocked by A).
+        run_cli(['create', '--title', 'Task A', '--body', 'b'], cwd=self.cwd)
+        run_cli(['create', '--title', 'Task B', '--body', 'b',
+                 '--blocked-by', '1'], cwd=self.cwd)
+        run_cli(['create', '--title', 'Task C', '--body', 'b',
+                 '--blocked-by', '1'], cwd=self.cwd)
+        # Create a PRD (task 4) and a child (task 5, parent=4).
+        run_cli(['create', '--title', 'The PRD', '--body', 'b',
+                 '--type', 'prd'], cwd=self.cwd)
+        run_cli(['create', '--title', 'Child of PRD', '--body', 'b',
+                 '--parent', '4'], cwd=self.cwd)
+
+    def _run(self, *args, stdin=None):
+        return run_cli(list(args), cwd=self.cwd, stdin=stdin)
+
+    # --- next ---
+
+    def test_next_returns_only_ready_task(self):
+        """Only A (task 1) is ready; B and C are blocked."""
+        result = self._run('next')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), '1')
+
+    def test_next_exit_0_on_success(self):
+        result = self._run('next')
+        self.assertEqual(result.returncode, 0)
+
+    def test_next_exit_1_empty_stdout_when_none(self):
+        """With label that no task has, exit 1 with empty stdout."""
+        result = self._run('next', '--label', 'nonexistent')
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout.strip(), '')
+
+    def test_next_after_close_unblocks_dependents(self):
+        """Close A; next should return B or C (lowest ID first: B=2)."""
+        self._run('close', '1', '--reason', 'completed')
+        result = self._run('next')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), '2')
+
+    def test_next_label_filter(self):
+        """Label filter constrains candidate set."""
+        # Add label to task A only.
+        self._run('edit', '1', '--add-label', 'afk')
+        result = self._run('next', '--label', 'afk')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), '1')
+
+    def test_next_excludes_prd(self):
+        """PRD task 4 must never be returned by next."""
+        # Close everything that would block to ensure PRD is not returned.
+        # PRDs are always excluded regardless.
+        # Create an unblocked task that is a prd.
+        run_cli(['create', '--title', 'Another PRD', '--body', 'b',
+                 '--type', 'prd'], cwd=self.cwd)
+        result = self._run('next')
+        self.assertEqual(result.returncode, 0)
+        # Returned task must be task 1 (the only ready non-PRD).
+        self.assertEqual(result.stdout.strip(), '1')
+
+    # --- list --ready ---
+
+    def test_list_ready_shows_only_ready_tasks(self):
+        result = self._run('list', '--ready')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Only A (task 1) is ready.
+        self.assertIn('Task A', result.stdout)
+        self.assertNotIn('Task B', result.stdout)
+        self.assertNotIn('Task C', result.stdout)
+        self.assertNotIn('The PRD', result.stdout)
+
+    def test_list_ready_after_close_shows_more(self):
+        """After closing A, both B and C appear in --ready."""
+        self._run('close', '1', '--reason', 'completed')
+        result = self._run('list', '--ready')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Task B', result.stdout)
+        self.assertIn('Task C', result.stdout)
+
+    def test_list_ready_json_length(self):
+        """JSON ready set: A (task 1) and Child of PRD (task 5) are ready."""
+        result = self._run('list', '--ready', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        # Task 1 (A) and task 5 (Child of PRD) are both open non-PRD with no blockers.
+        numbers = [item['number'] for item in data]
+        self.assertIn(1, numbers)
+        self.assertIn(5, numbers)
+
+    def test_list_ready_with_label_filter(self):
+        self._run('edit', '1', '--add-label', 'tagged')
+        result = self._run('list', '--ready', '--label', 'tagged')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Task A', result.stdout)
+
+    def test_list_ready_excludes_prd_type(self):
+        """PRD-type tasks are excluded; task-type children of PRDs are included."""
+        result = self._run('list', '--ready')
+        # PRD (type=prd) is excluded.
+        self.assertNotIn('The PRD', result.stdout)
+        # Child of PRD (type=task, no blockers) IS ready and should appear.
+        self.assertIn('Child of PRD', result.stdout)
+
+    # --- edit --add-blocked-by cycle rejection ---
+
+    def test_edit_add_blocked_by_cycle_rejected(self):
+        """A is blocked by B, B blocked by A — second edit must fail."""
+        # Currently A=1 is unblocked, B=2 is blocked by A=1.
+        # Add A blocked_by B=2 — that would create 1->2->1.
+        result = self._run('edit', '1', '--add-blocked-by', '2')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('cycle', result.stderr.lower())
+
+    def test_edit_add_blocked_by_no_cycle_succeeds(self):
+        """Adding a non-cycling edge is accepted."""
+        # Create task 6 with no blockers, then make it block C=3.
+        # That means 3->6: no cycle (6 doesn't depend on anything).
+        run_cli(['create', '--title', 'Task D', '--body', 'b'], cwd=self.cwd)
+        # D is task 6; add C blocked_by D (3->6): safe.
+        result = self._run('edit', '3', '--add-blocked-by', '6')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_edit_add_blocked_by_no_write_on_cycle(self):
+        """File must not be modified when cycle is rejected."""
+        _, path_before = run_cli(['view', '1', '--json'], cwd=self.cwd), None
+        view_before = self._run('view', '1', '--json')
+        d_before = json.loads(view_before.stdout)
+        # Attempt to create cycle (should fail).
+        self._run('edit', '1', '--add-blocked-by', '2')
+        view_after = self._run('view', '1', '--json')
+        d_after = json.loads(view_after.stdout)
+        # blockedBy must be unchanged.
+        self.assertEqual(d_before['blockedBy'], d_after['blockedBy'])
+
+    # --- delete --cascade ---
+
+    def test_cascade_delete_requires_yes(self):
+        """--cascade without --yes must error regardless of TTY."""
+        result = self._run('delete', '4', '--cascade', stdin='')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--yes', result.stderr)
+
+    def test_cascade_delete_with_yes_removes_parent_and_child(self):
+        """delete PRD (4) --cascade --yes removes task 4 and task 5."""
+        result = self._run('delete', '4', '--cascade', '--yes')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Verify both are gone.
+        view4 = self._run('view', '4')
+        self.assertNotEqual(view4.returncode, 0)
+        view5 = self._run('view', '5')
+        self.assertNotEqual(view5.returncode, 0)
+
+    def test_cascade_delete_output_lists_deleted_ids(self):
+        result = self._run('delete', '4', '--cascade', '--yes')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Output should mention task 4 and task 5.
+        self.assertIn('#4', result.stdout)
+        self.assertIn('#5', result.stdout)
+
+    def test_cascade_delete_no_children_succeeds(self):
+        """Cascade on a task with no children just deletes the task."""
+        # Task 1 has no children (B/C are blocked by it, but parent != 1).
+        result = self._run('delete', '1', '--cascade', '--yes')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('#1', result.stdout)
+
+    def test_cascade_delete_missing_task_errors(self):
+        result = self._run('delete', '999', '--cascade', '--yes')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('not found', result.stderr.lower())
+
+
 class GhCompatNoOpTests(unittest.TestCase):
     """Smoke tests: --web and --repo R are accepted as no-ops on every verb."""
 
