@@ -37,7 +37,7 @@ class IsolatedRepoTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
-        self.issues_dir = workspace_init(self.base)
+        self.issues_dir = workspace_init(self.base)['issues_dir']
 
 
 class RepoBasicsTests(IsolatedRepoTestCase):

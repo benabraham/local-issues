@@ -205,17 +205,22 @@ def workspace_resolve(start=None, auto_create=False):
             "Run `issues init` to create one here."
         )
     base = Path(start).resolve() if start else Path.cwd().resolve()
-    issues_dir = base / ISSUES_DIRNAME
-    workspace_init(base)
-    return issues_dir
+    status = workspace_init(base)
+    return status['issues_dir']
 
 
 def workspace_init(base, with_gitignore=False):
     """Create `issues/`, `open/`, `closed/`, README at `base`.
 
     Idempotent: existing dirs/files are left alone (README is not overwritten).
+
+    Returns a dict with status keys:
+      - 'created': True if issues/ did not exist before this call
+      - 'gitignore_updated': True if .gitignore was written (only when
+        with_gitignore=True and the entry was not already present)
     """
     issues_dir = base / ISSUES_DIRNAME
+    created = not issues_dir.exists()
     open_dir = issues_dir / OPEN_DIRNAME
     closed_dir = issues_dir / CLOSED_DIRNAME
     open_dir.mkdir(parents=True, exist_ok=True)
@@ -223,15 +228,17 @@ def workspace_init(base, with_gitignore=False):
     readme = issues_dir / README_FILENAME
     if not readme.exists():
         readme.write_text(DEFAULT_README, encoding='utf-8')
+    gitignore_updated = False
     if with_gitignore:
-        _append_gitignore(base)
-    return issues_dir
+        gitignore_updated = _append_gitignore(base)
+    return {'issues_dir': issues_dir, 'created': created,
+            'gitignore_updated': gitignore_updated}
 
 
 def _append_gitignore(base):
     """Append `issues/` to `<base>/.gitignore` if not already listed.
 
-    Best effort — quietly does nothing if the entry already exists.
+    Returns True if the file was written, False if the entry was already present.
     """
     gitignore = base / '.gitignore'
     entry = f'{ISSUES_DIRNAME}/'
@@ -240,10 +247,11 @@ def _append_gitignore(base):
         existing = gitignore.read_text(encoding='utf-8')
         lines = [line.strip() for line in existing.splitlines()]
         if entry in lines or ISSUES_DIRNAME in lines:
-            return
+            return False
     sep = '' if (not existing) or existing.endswith('\n') else '\n'
     with open(gitignore, 'a', encoding='utf-8') as fh:
         fh.write(f'{sep}{entry}\n')
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1751,10 +1759,18 @@ def cli_dispatch(argv=None):
 
 def cli_cmd_init(args):
     base = Path.cwd()
-    issues_dir = workspace_init(base, with_gitignore=args.gitignore)
-    sys.stdout.write(f'Initialised {issues_dir}\n')
+    status = workspace_init(base, with_gitignore=args.gitignore)
+    issues_dir = status['issues_dir']
+    if status['created']:
+        sys.stdout.write(f'Initialised {issues_dir}\n')
+    else:
+        sys.stdout.write(f'Already initialised {issues_dir}\n')
     if args.gitignore:
-        sys.stdout.write(f'Updated {base / ".gitignore"}\n')
+        gitignore_path = base / '.gitignore'
+        if status['gitignore_updated']:
+            sys.stdout.write(f'Updated {gitignore_path}\n')
+        else:
+            sys.stdout.write(f".gitignore already contains 'issues/'\n")
     return 0
 
 

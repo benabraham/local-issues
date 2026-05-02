@@ -46,10 +46,39 @@ class SmokeTests(unittest.TestCase):
         self.assertTrue((self.cwd / 'issues' / 'closed').is_dir())
         self.assertTrue((self.cwd / 'issues' / 'README.md').is_file())
 
+    def test_init_first_run_prints_initialised(self):
+        result = self._init()
+        self.assertIn('Initialised', result.stdout)
+        self.assertNotIn('Already', result.stdout)
+
+    def test_init_second_run_prints_already_initialised(self):
+        self._init()
+        result = self._init()
+        self.assertIn('Already initialised', result.stdout)
+
     def test_init_gitignore(self):
         self._init('--gitignore')
         gi = (self.cwd / '.gitignore').read_text(encoding='utf-8')
         self.assertIn('issues/', gi)
+
+    def test_init_gitignore_first_run_prints_updated(self):
+        result = self._init('--gitignore')
+        self.assertIn('Updated', result.stdout)
+
+    def test_init_gitignore_second_run_no_spurious_write(self):
+        self._init('--gitignore')
+        gi_before = (self.cwd / '.gitignore').read_text(encoding='utf-8')
+        result = self._init('--gitignore')
+        gi_after = (self.cwd / '.gitignore').read_text(encoding='utf-8')
+        # Content unchanged (no duplicate entry).
+        self.assertEqual(gi_before, gi_after)
+        # Message indicates already present.
+        self.assertIn("already contains 'issues/'", result.stdout)
+
+    def test_init_exit_code_always_zero(self):
+        self._init()
+        result = self._init()
+        self.assertEqual(result.returncode, 0)
 
     def test_create_with_body_flag(self):
         self._init()
