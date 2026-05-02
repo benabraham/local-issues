@@ -273,8 +273,6 @@ class WorkspaceFindGitTests(unittest.TestCase):
             repo.mkdir()
             (repo / '.git').mkdir()
             # Neither repo/ nor tmp/ has issues/.
-            result = workspace_find(repo / 'src')
-            # src doesn't exist yet — use repo itself as start.
             result = workspace_find(repo)
             self.assertIsNone(result)
 
@@ -321,7 +319,6 @@ class WorkspaceFindGitTests(unittest.TestCase):
             )
             (worktree / ISSUES_DIRNAME).mkdir()
 
-            result = workspace_find(worktree / 'sub')
             (worktree / 'sub').mkdir()
             result = workspace_find(worktree / 'sub')
             self.assertEqual(result, worktree / ISSUES_DIRNAME)

@@ -170,7 +170,7 @@ def workspace_find(start=None):
     result = _find_git_marker(cwd)
 
     if result is not None:
-        git_path, kind = result
+        git_path, _ = result
         # Repo root: parent of .git dir, or parent of .git file (worktree).
         repo_root = git_path.parent
 
