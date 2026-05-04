@@ -112,6 +112,19 @@ Mirrored from `gh issue`: verb names, `--label`, `--state`, `--json`, `--body`/`
 
 Extensions on top: `next` verb, `--ready` filter on `list`, `--type {task|prd|all}` (default excludes PRDs), `--priority N`, `--blocked-by N`, `--parent N`, `--cascade --yes` on delete, `--comments/-c` on view (renders comments inline in text mode).
 
+## Development
+
+```sh
+git clone git@github.com:benabraham/local-issues
+cd local-issues
+
+# Run tests (stdlib unittest; no deps to install)
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+
+# Editable install for `issues` to point at your working copy
+uv pip install -e .   # or: pip install -e .
+```
+
 ## License
 
 MIT — see [LICENSE](./LICENSE).
